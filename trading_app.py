@@ -286,7 +286,7 @@ def main():
     
     # Ejemplo 3: Trading automático (comentado por seguridad)
     # Descomentar para activar trading real
-    """
+    
     logger.info("\n" + "="*60)
     logger.info("EJEMPLO 3: TRADING AUTOMÁTICO")
     logger.info("="*60)
@@ -296,7 +296,7 @@ def main():
     if app.setup_strategy(symbols, timeframe=mt5.TIMEFRAME_H1):
         # Ejecutar 5 iteraciones con intervalo de 60 segundos
         app.run_trading_mode(iterations=5, interval=60)
-    """
+    
     
     # Cerrar aplicación
     app.shutdown()

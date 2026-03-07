@@ -122,7 +122,7 @@ def ejemplo_4_analisis_completo():
         
         print("\nNiveles:")
         print(f"  Resistencias: {analysis['levels']['resistances']}")
-        print(f"  Soportes: {analysis['levels']['soportes']}")
+        print(f"  Soportes: {analysis['levels']['supports']}")
     
     connector.disconnect()
 

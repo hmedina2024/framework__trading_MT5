@@ -368,8 +368,9 @@ class RiskManager:
         if account_info.is_margin_call:
             return False, "Cuenta en margin call"
         
-        # Verificar nivel de margen mínimo
-        if account_info.margin_level < 200:
+        # Verificar nivel de margen mínimo, pero solo si hay margen en uso (>0)
+        # Cuando no hay operaciones abiertas, margin_level es 0.0
+        if account_info.margin_level > 0 and account_info.margin_level < 200:
             return False, f"Nivel de margen bajo: {account_info.margin_level:.2f}%"
         
         return True, "Trading permitido"
