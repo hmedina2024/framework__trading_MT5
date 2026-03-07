@@ -1,0 +1,29 @@
+Name     : Henry Medina
+Type     : Forex Hedged USD
+Server   : MetaQuotes-Demo
+Login    : 103970471
+Password : 2nHuBnR_
+Investor : @jX5LvXe
+
+
+
+Metatraider 5
+henryMedina26
+3DLjcwKc
+
+
+server: PepperstoneUK-Demo  o  Pepperstone-Demo
+login: 451655078
+pasw : 3DLjcwKc*
+
+
+
+Para reactivar UAC después (importante hacerlo):
+
+reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v EnableLUA /t REG_DWORD /d 1 /f
+
+
+
+cd C:\Users\usuario\Desktop\MT5_trider
+venv\Scripts\activate
+python test_connection.py
