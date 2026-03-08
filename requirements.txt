@@ -3,16 +3,12 @@ MetaTrader5>=5.0.45
 python-dotenv>=1.0.0
 pydantic>=2.0.0
 
+# API & Backend
+fastapi>=0.100.0
+uvicorn[standard]>=0.20.0
+websockets>=11.0
+requests>=2.31.0
+
 # Data analysis and manipulation
 pandas>=2.0.0
 numpy>=1.24.0
-
-# Optional: Telegram notifications (comentar si no se usa)
-# python-telegram-bot>=20.0
-
-# Development dependencies (opcional)
-# pytest>=7.4.0
-# pytest-cov>=4.1.0
-# black>=23.0.0
-# flake8>=6.0.0
-# mypy>=1.5.0

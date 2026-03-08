@@ -40,6 +40,14 @@ class LoggerSetup:
         
         # Handler para consola
         console_handler = logging.StreamHandler(sys.stdout)
+        try:
+            # Intentar reconfigurar stdout para UTF-8 si es posible (Python 3.7+)
+            if sys.stdout.encoding != 'utf-8':
+                sys.stdout.reconfigure(encoding='utf-8')
+        except AttributeError:
+            # Fallback para versiones antiguas o si no es soportado
+            pass
+            
         console_handler.setLevel(logging.INFO)
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
