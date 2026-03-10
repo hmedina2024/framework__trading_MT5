@@ -147,6 +147,7 @@ class SymbolInfo(BaseModel):
     name: str = Field(..., description="Nombre del símbolo")
     description: str = Field(..., description="Descripción")
     point: float = Field(..., description="Tamaño del punto")
+    tick_value: float = Field(..., description="Valor del tick para un lote")
     digits: int = Field(..., description="Dígitos decimales")
     spread: int = Field(..., description="Spread en puntos")
     trade_contract_size: float = Field(..., description="Tamaño del contrato")

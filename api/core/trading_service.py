@@ -17,6 +17,7 @@ from utils import get_logger
 import asyncio
 from typing import Dict, List, Optional
 import MetaTrader5 as mt5
+import random
 
 logger = get_logger(__name__)
 
@@ -166,12 +167,17 @@ class TradingService:
             return False
 
         try:
+            # Generar un número mágico único para esta instancia de estrategia
+            unique_magic_number = random.randint(10000, 999999)
+            logger.info(f"Asignando Magic Number único {unique_magic_number} a la estrategia {strategy_id}")
+
             common_args = dict(
                 connector=self.connector,
                 order_manager=self.order_manager,
                 risk_manager=self.risk_manager,
                 market_analyzer=self.market_analyzer,
                 symbols=[symbol],
+                magic_number=unique_magic_number
             )
 
             if strategy_type == "MA_CROSS":

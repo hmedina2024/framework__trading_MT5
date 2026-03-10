@@ -208,8 +208,8 @@ class PlatformConnector:
                     stop_loss=pos.sl if pos.sl > 0 else None,
                     take_profit=pos.tp if pos.tp > 0 else None,
                     profit=pos.profit,
-                    swap=pos.swap,
-                    commission=pos.commission,
+                    swap=getattr(pos, "swap", 0.0),
+                    commission=getattr(pos, "commission", 0.0),
                     magic_number=pos.magic,
                     comment=pos.comment,
                     time_open=datetime.fromtimestamp(pos.time)
@@ -278,6 +278,7 @@ class PlatformConnector:
                 name=info.name,
                 description=info.description,
                 point=info.point,
+                tick_value=getattr(info, 'trade_tick_value', getattr(info, 'tick_value', 0.0)),
                 digits=info.digits,
                 spread=info.spread,
                 trade_contract_size=info.trade_contract_size,

@@ -1,6 +1,8 @@
 """
 Clase base para estrategias de trading
 """
+import threading
+import time
 from abc import ABC, abstractmethod
 from typing import Optional, Dict, List
 import pandas as pd
@@ -50,7 +52,13 @@ class StrategyBase(ABC):
         self.magic_number = magic_number or 234000
         
         self.is_running = False
+        self._thread = None
         self.positions: Dict[str, Position] = {}
+        self._stats = {
+            "trades_count": 0,
+            "wins": 0,
+            "losses": 0,
+        }
         
         logger.info(f"Estrategia '{name}' inicializada para {symbols}")
     
@@ -94,9 +102,9 @@ class StrategyBase(ABC):
             True si la ejecución fue exitosa
         """
         try:
-            # Verificar si ya hay posición abierta
+            # Verificar si ya hay posición abierta para este bot en este símbolo
             if self._has_open_position(symbol):
-                logger.debug(f"Ya existe posición abierta para {symbol}")
+                logger.info(f"Ignorando señal para {symbol}: Ya existe una posición abierta gestionada por este bot.")
                 return False
             
             # Verificar si se permite operar
@@ -128,7 +136,7 @@ class StrategyBase(ABC):
                 stop_loss=prices['stop_loss'],
                 take_profit=prices['take_profit'],
                 magic_number=self.magic_number,
-                comment=f"{self.name} - {signal.get('reason', '')}"
+                comment=f"{self.name} {signal['direction']}"[:31]  # Truncar a 31 caracteres por seguridad
             )
             
             # Validar con gestor de riesgo
@@ -230,6 +238,9 @@ class StrategyBase(ABC):
             result: Resultado de la operación
         """
         logger.info(f"Trade abierto: {symbol} - Ticket: {result.ticket}")
+        self._stats["trades_count"] += 1
+        logger.info(f"Estadísticas de '{self.name}' actualizadas: "
+                   f"Trades: {self._stats['trades_count']}")
     
     def on_trade_closed(self, position: Position, result) -> None:
         """
@@ -240,17 +251,70 @@ class StrategyBase(ABC):
             result: Resultado del cierre
         """
         logger.info(f"Trade cerrado: {position.symbol} - Ticket: {position.ticket} - P&L: {position.profit}")
-        self.risk_manager.update_daily_stats(position.profit)
+        self.update_stats(position.profit)
     
+    def update_stats(self, profit: float) -> None:
+        """Actualiza las estadísticas de la estrategia tras cerrar una operación"""
+        if profit >= 0:
+            self._stats["wins"] += 1
+        else:
+            self._stats["losses"] += 1
+        
+        logger.info(f"Estadísticas de '{self.name}' actualizadas: "
+                   f"Trades: {self._stats['trades_count']}, "
+                   f"Wins: {self._stats['wins']}, "
+                   f"Losses: {self._stats['losses']}")
+
     def start(self) -> None:
-        """Inicia la estrategia"""
+        """Inicia la estrategia en un hilo de ejecución"""
+        if self.is_running:
+            logger.warning(f"Estrategia '{self.name}' ya está en ejecución.")
+            return
+            
         self.is_running = True
         logger.info(f"Estrategia '{self.name}' iniciada")
+        
+        # Iniciar el bucle principal en un hilo separado
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
+        
+    def _run_loop(self) -> None:
+        """Bucle infinito que llama a run_iteration cada cierto intervalo"""
+        logger.info(f"Hilo de estrategia '{self.name}' ejecutándose en segundo plano...")
+        # Configurar un intervalo de verificación (por ejemplo, cada 1 minuto)
+        # Esto podría ajustarse dependiendo de self.timeframe
+        check_interval_seconds = 60 
+        
+        while self.is_running:
+            try:
+                self.run_iteration()
+            except Exception as e:
+                logger.error(f"Excepción en el hilo de la estrategia '{self.name}': {str(e)}", exc_info=True)
+                
+            # Dormir durante el intervalo o salir antes si is_running cambia a False
+            for _ in range(check_interval_seconds):
+                if not self.is_running:
+                    break
+                time.sleep(1)
+                
+        logger.info(f"Hilo de estrategia '{self.name}' finalizado.")
     
     def stop(self) -> None:
-        """Detiene la estrategia"""
+        """Detiene la estrategia y su hilo de ejecución"""
         self.is_running = False
+        if self._thread and self._thread.is_alive():
+            logger.info(f"Esperando a que el hilo de '{self.name}' termine...")
+            # En la próxima iteración del loop interno se romperá el ciclo
         logger.info(f"Estrategia '{self.name}' detenida")
+
+    def get_daily_stats(self) -> Dict:
+        """Calcula y devuelve las estadísticas de la estrategia"""
+        stats = self._stats.copy()
+        if stats["trades_count"] > 0:
+            stats["win_rate"] = (stats["wins"] / stats["trades_count"]) * 100
+        else:
+            stats["win_rate"] = 0.0
+        return stats
     
     def get_statistics(self) -> Dict:
         """
@@ -259,7 +323,7 @@ class StrategyBase(ABC):
         Returns:
             Diccionario con estadísticas
         """
-        daily_stats = self.risk_manager.get_daily_stats()
+        daily_stats = self.get_daily_stats()
         account_info = self.connector.get_account_info()
         
         stats = {

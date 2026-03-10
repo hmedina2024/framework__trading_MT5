@@ -138,7 +138,7 @@ class OrderManager:
                 "price": request.price,
                 "deviation": request.deviation,
                 "magic": request.magic_number,
-                "comment": request.comment,
+                "comment": str(request.comment)[:31] if getattr(request, "comment", None) else "",
                 "type_time": mt5.ORDER_TIME_GTC,
                 "type_filling": mt5.ORDER_FILLING_IOC,
             }

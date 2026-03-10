@@ -7,12 +7,13 @@
 const AppState = {
     currentPage: 'dashboard',
     currentOrderType: 'BUY',
-    watchlist: ['EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD'],
+    watchlist: ['EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD','USDJPY','AUDUSD'],
     refreshInterval: null,
     chart: null,
     chartSeries: null,
     currentChartSymbol: 'EURUSD',
     currentChartTimeframe: 60,  // H1 por defecto (en minutos)
+    initialDataLoaded: false, // Control para la carga inicial de datos
 };
 
 // Mapa de timeframe (minutos) a nombre MT5
@@ -31,9 +32,9 @@ const TIMEFRAME_MAP = {
 document.addEventListener('DOMContentLoaded', () => {
     initNavigation();
     initChart();
-    loadDashboard();
+    // loadDashboard(); // Se elimina la carga directa para esperar la confirmación de conexión
     startAutoRefresh();
-    checkServerHealth();
+    checkServerHealth(); // Esta función se encargará de la carga inicial
     loadStrategyCatalog();  // Cargar catálogo de estrategias desde el backend
 });
 
@@ -92,33 +93,60 @@ function loadCurrentPage() {
 // ============ AUTO REFRESH ============
 
 function startAutoRefresh() {
+    // Si ya existe un intervalo, lo limpiamos para evitar duplicados
+    if (AppState.refreshInterval) {
+        clearInterval(AppState.refreshInterval);
+    }
+    
+    // Establecer el nuevo intervalo
     AppState.refreshInterval = setInterval(() => {
-        loadCurrentPage();
-        updateWatchlistPrices();
+        // Solo refrescar si el servidor está conectado
+        const statusDot = document.getElementById('statusDot');
+        if (statusDot && statusDot.classList.contains('connected')) {
+            loadCurrentPage();
+            // Ya no es necesario llamar a updateWatchlistPrices() aquí,
+            // porque loadDashboard() (parte de loadCurrentPage) ya lo hace.
+        } else {
+            console.log('Auto-refresh pausado: MT5 no conectado.');
+        }
     }, 5000); // Cada 5 segundos
 }
 
 // ============ HEALTH CHECK ============
 
 async function checkServerHealth() {
-    const health = await HealthAPI.check();
-    const dot = document.getElementById('statusDot');
-    const text = document.getElementById('statusText');
-    const serverDot = document.getElementById('serverDot');
-    const serverText = document.getElementById('serverStatusText');
+    try {
+        const health = await HealthAPI.check();
+        const dot = document.getElementById('statusDot');
+        const text = document.getElementById('statusText');
+        const serverDot = document.getElementById('serverDot');
+        const serverText = document.getElementById('serverStatusText');
 
-    if (health.mt5_connected) {
-        dot.className = 'status-dot connected';
-        text.textContent = 'MT5 Conectado';
-        if (serverDot) { serverDot.className = 'status-dot connected'; serverText.textContent = 'Servidor Online'; }
-    } else {
-        dot.className = 'status-dot disconnected';
-        text.textContent = health.status === 'offline' ? 'Servidor Offline' : 'MT5 Desconectado';
-        if (serverDot) { serverDot.className = 'status-dot disconnected'; serverText.textContent = health.status === 'offline' ? 'Servidor Offline' : 'MT5 Desconectado'; }
+        if (health.mt5_connected) {
+            if (dot) dot.className = 'status-dot connected';
+            if (text) text.textContent = 'MT5 Conectado';
+            if (serverDot) serverDot.className = 'status-dot connected';
+            if (serverText) serverText.textContent = 'Servidor Online';
+
+            // Si es la primera vez que se conecta, cargar los datos del dashboard
+            if (!AppState.initialDataLoaded) {
+                console.log("Conexión con MT5 establecida. Realizando carga inicial de datos...");
+                loadDashboard();
+                AppState.initialDataLoaded = true;
+            }
+
+        } else {
+            if (dot) dot.className = 'status-dot disconnected';
+            if (text) text.textContent = health.status === 'offline' ? 'Servidor Offline' : 'MT5 Desconectado';
+            if (serverDot) serverDot.className = 'status-dot disconnected';
+            if (serverText) serverText.textContent = health.status === 'offline' ? 'Servidor Offline' : 'Servidor Online, MT5 Desconectado';
+        }
+    } catch (err) {
+        console.warn("Error en Health Check:", err.message);
+    } finally {
+        // Repetir cada 10 segundos
+        setTimeout(checkServerHealth, 10000);
     }
-
-    // Repetir cada 10 segundos
-    setTimeout(checkServerHealth, 10000);
 }
 
 // ============ DASHBOARD ============
@@ -336,16 +364,16 @@ async function loadChartData(symbol, timeframe) {
     const tfName = TIMEFRAME_MAP[timeframe] || 'H1';
 
     try {
-        // Llamar al endpoint de análisis que devuelve datos históricos
-        const data = await MarketAPI.getAnalysis(symbol);
+        // Llamar al endpoint dedicado de velas OHLC con el timeframe correcto
+        const data = await MarketAPI.getCandles(symbol, timeframe, 200);
 
         if (data && data.candles && data.candles.length > 0) {
             // Convertir datos al formato de LightweightCharts
             const candleData = data.candles.map(c => ({
                 time: Math.floor(new Date(c.time).getTime() / 1000),
-                open: c.open,
-                high: c.high,
-                low: c.low,
+                open:  c.open,
+                high:  c.high,
+                low:   c.low,
                 close: c.close,
             })).sort((a, b) => a.time - b.time);
 
@@ -364,9 +392,9 @@ async function loadChartData(symbol, timeframe) {
         const base = 1.1000 + (Math.random() - 0.5) * 0.02;
         return {
             time: now - (100 - i) * intervalSecs,
-            open: base,
-            high: base + Math.random() * 0.003,
-            low: base - Math.random() * 0.003,
+            open:  base,
+            high:  base + Math.random() * 0.003,
+            low:   base - Math.random() * 0.003,
             close: base + (Math.random() - 0.5) * 0.002,
         };
     });
@@ -391,12 +419,14 @@ function adjustVolume(delta) {
 async function executeOrder() {
     const symbol = document.getElementById('orderSymbol').value;
     const volume = parseFloat(document.getElementById('orderVolume').value);
-    const sl = parseFloat(document.getElementById('orderSL').value) || null;
-    const tp = parseFloat(document.getElementById('orderTP').value) || null;
+    const slVal = document.getElementById('orderSL').value;
+    const tpVal = document.getElementById('orderTP').value;
+    const sl = slVal && parseFloat(slVal) > 0 ? parseFloat(slVal) : null;
+    const tp = tpVal && parseFloat(tpVal) > 0 ? parseFloat(tpVal) : null;
     const comment = document.getElementById('orderComment').value;
 
-    if (!symbol || !volume) {
-        showToast('Completa los campos requeridos', 'warning');
+    if (!symbol || !volume || isNaN(volume) || volume <= 0) {
+        showToast('Completa los campos requeridos (símbolo y volumen)', 'warning');
         return;
     }
 
@@ -417,10 +447,14 @@ async function executeOrder() {
         async () => {
             try {
                 const result = await OrdersAPI.createOrder(orderData);
-                showToast(`Orden ejecutada! Ticket: ${result.ticket}`, 'success');
+                const ticketNum = result.ticket || result.order_id || '—';
+                showToast(`✅ Orden ejecutada! Ticket: #${ticketNum}`, 'success');
                 loadPositions();
+                loadAccountInfo();
             } catch (err) {
-                showToast(`Error: ${err.message}`, 'error');
+                // Mejorar mensajes de error conocidos de MT5
+                const msg = translateMT5Error(err.message);
+                showToast(`Error al ejecutar orden: ${msg}`, 'error');
             }
         }
     );
@@ -433,11 +467,13 @@ async function closePosition(ticket) {
         async () => {
             try {
                 await OrdersAPI.closePosition(ticket);
-                showToast(`Posición #${ticket} cerrada`, 'success');
+                showToast(`✅ Posición #${ticket} cerrada`, 'success');
                 loadPositions();
                 loadAccountInfo();
+                loadAllPositions(); // Asegura la actualización de la tabla grande
             } catch (err) {
-                showToast(`Error: ${err.message}`, 'error');
+                const msg = translateMT5Error(err.message);
+                showToast(`Error al cerrar posición: ${msg}`, 'error');
             }
         }
     );
@@ -492,19 +528,26 @@ async function runAnalysis() {
 function renderAnalysis(data) {
     // Tendencia
     const trendEl = document.getElementById('trendIndicator');
-    const trendText = document.getElementById('trendText');
     const trendIcons = { UPTREND: '↑', DOWNTREND: '↓', SIDEWAYS: '→' };
     const trendClasses = { UPTREND: 'up', DOWNTREND: 'down', SIDEWAYS: 'sideways' };
+    const trendDir = data.trend_direction || 'SIDEWAYS';
 
-    trendEl.className = `trend-indicator ${trendClasses[data.trend_direction] || ''}`;
-    trendEl.innerHTML = `<span>${trendIcons[data.trend_direction] || '→'}</span><span>${data.trend_direction}</span>`;
-    trendText.textContent = data.trend_direction;
+    if (trendEl) {
+        trendEl.className = `trend-indicator ${trendClasses[trendDir] || ''}`;
+        trendEl.innerHTML = `<span>${trendIcons[trendDir] || '→'}</span><span>${trendDir}</span>`;
+    }
+
+    // trendText es un span DENTRO de trendIndicator; si existe como elemento separado lo actualizamos
+    const trendText = document.getElementById('trendText');
+    if (trendText) trendText.textContent = trendDir;
 
     // Señal general
     const signalEl = document.getElementById('overallSignal');
     const overall = data.signals?.overall || 'NEUTRAL';
-    signalEl.textContent = overall;
-    signalEl.className = `signal-badge ${overall}`;
+    if (signalEl) {
+        signalEl.textContent = overall;
+        signalEl.className = `signal-badge ${overall}`;
+    }
 
     // Indicadores
     const ind = data.indicators || {};
@@ -523,7 +566,8 @@ function renderAnalysis(data) {
             <span class="indicator-value">${i.value}</span>
         </div>
     `).join('');
-    document.getElementById('indicatorsList').innerHTML = indicatorsHtml;
+    const indicatorsListEl = document.getElementById('indicatorsList');
+    if (indicatorsListEl) indicatorsListEl.innerHTML = indicatorsHtml;
 
     // Señales
     const signals = data.signals || {};
@@ -535,29 +579,63 @@ function renderAnalysis(data) {
                 <span class="signal-value ${value}">${value}</span>
             </div>
         `).join('');
-    document.getElementById('signalsList').innerHTML = signalsHtml;
+    const signalsListEl = document.getElementById('signalsList');
+    if (signalsListEl) signalsListEl.innerHTML = signalsHtml;
 
     // Niveles
     const levels = data.support_resistance || {};
+    const resistancesHtml = (levels.resistances || []).length > 0
+        ? (levels.resistances || []).map(r => `
+            <div class="level-item level-resistance">
+                <span>Resistencia</span><span>${Number(r).toFixed(5)}</span>
+            </div>`).join('')
+        : '<p style="color:var(--text-muted);font-size:12px">No detectadas</p>';
+    const supportsHtml = (levels.supports || []).length > 0
+        ? (levels.supports || []).map(s => `
+            <div class="level-item level-support">
+                <span>Soporte</span><span>${Number(s).toFixed(5)}</span>
+            </div>`).join('')
+        : '<p style="color:var(--text-muted);font-size:12px">No detectados</p>';
+
     const levelsHtml = `
-        <div class="levels-section">
-            <h5>Resistencias</h5>
-            ${(levels.resistances || []).map(r => `
-                <div class="level-item level-resistance">
-                    <span>Resistencia</span><span>${r.toFixed(5)}</span>
-                </div>
-            `).join('') || '<p style="color:var(--text-muted);font-size:12px">No detectadas</p>'}
-        </div>
-        <div class="levels-section">
-            <h5>Soportes</h5>
-            ${(levels.supports || []).map(s => `
-                <div class="level-item level-support">
-                    <span>Soporte</span><span>${s.toFixed(5)}</span>
-                </div>
-            `).join('') || '<p style="color:var(--text-muted);font-size:12px">No detectados</p>'}
-        </div>
+        <div class="levels-section"><h5>Resistencias</h5>${resistancesHtml}</div>
+        <div class="levels-section"><h5>Soportes</h5>${supportsHtml}</div>
     `;
-    document.getElementById('levelsDisplay').innerHTML = levelsHtml;
+    const levelsDisplayEl = document.getElementById('levelsDisplay');
+    if (levelsDisplayEl) levelsDisplayEl.innerHTML = levelsHtml;
+}
+
+// ============ MT5 ERROR TRANSLATOR ============
+
+/**
+ * Traduce mensajes de error de MT5 a texto legible en español.
+ * @param {string} msg - Mensaje de error original
+ * @returns {string} Mensaje traducido
+ */
+function translateMT5Error(msg) {
+    if (!msg) return 'Error desconocido';
+    const m = msg.toLowerCase();
+
+    if (m.includes('autotrading disabled') || m.includes('10027'))
+        return 'El AutoTrading está desactivado en MT5. Actívalo con el botón "AutoTrading" en la barra de herramientas de MT5.';
+    if (m.includes('no money') || m.includes('10019'))
+        return 'Fondos insuficientes para ejecutar la orden.';
+    if (m.includes('market closed') || m.includes('10018'))
+        return 'El mercado está cerrado en este momento.';
+    if (m.includes('invalid volume') || m.includes('10014'))
+        return 'Volumen inválido. Verifica el tamaño del lote.';
+    if (m.includes('invalid stops') || m.includes('10016'))
+        return 'Stop Loss o Take Profit inválidos para este símbolo.';
+    if (m.includes('trade disabled') || m.includes('10017'))
+        return 'El trading está deshabilitado para este símbolo.';
+    if (m.includes('not connected') || m.includes('503'))
+        return 'MT5 no está conectado. Verifica la conexión.';
+    if (m.includes('requote') || m.includes('10004'))
+        return 'Requote: el precio cambió. Intenta de nuevo.';
+    if (m.includes('off quotes') || m.includes('10008'))
+        return 'Sin cotizaciones disponibles. Intenta de nuevo.';
+
+    return msg;
 }
 
 // ============ STRATEGIES ============
