@@ -116,6 +116,22 @@ class StrategyBase(ABC):
             # Calcular precios de entrada/salida
             prices = self.calculate_entry_exit(symbol, signal)
             
+            # Validar ratio R:R mínimo antes de continuar
+            rr_ratio = self.risk_manager.get_risk_reward_ratio(
+                prices['entry'],
+                prices['stop_loss'],
+                prices['take_profit'],
+                is_buy=(signal['direction'] == 'BUY')
+            )
+            MIN_RR_RATIO = 1.0  # Mínimo 1:1, no abrir si ganancia < riesgo
+            if rr_ratio < MIN_RR_RATIO:
+                logger.warning(
+                    f"⚠️ Señal rechazada para {symbol}: R:R insuficiente "
+                    f"({rr_ratio:.2f} < {MIN_RR_RATIO}). "
+                    f"Entry: {prices['entry']}, SL: {prices['stop_loss']}, TP: {prices['take_profit']}"
+                )
+                return False
+
             # Calcular tamaño de posición
             volume = self.risk_manager.calculate_position_size(
                 symbol,

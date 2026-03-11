@@ -193,17 +193,22 @@ class BollingerBandsStrategy(StrategyBase):
         df['atr'] = self.market_analyzer.calculate_atr(df)
         atr = df['atr'].iloc[-1]
 
+        # XAUUSD requiere distancia mínima mayor en SL/TP
+        # Usar multiplicador dinámico según el símbolo
+        sl_multiplier = 2.0 if 'XAU' in symbol or 'XAG' in symbol else 0.5
+        min_stop_distance = symbol_info.point * 100  # distancia mínima absoluta
+
         if signal['direction'] == 'BUY':
             entry = market_data.ask
-            # SL justo debajo de la banda inferior
-            stop_loss = signal['bb_lower'] - (atr * 0.5)
-            # TP en la banda media (objetivo de reversión)
+            raw_sl = signal['bb_lower'] - (atr * sl_multiplier)
+            # Asegurar distancia mínima del precio
+            stop_loss = min(raw_sl, entry - max(atr * sl_multiplier, min_stop_distance))
             take_profit = signal['bb_middle']
         else:
             entry = market_data.bid
-            # SL justo encima de la banda superior
-            stop_loss = signal['bb_upper'] + (atr * 0.5)
-            # TP en la banda media
+            raw_sl = signal['bb_upper'] + (atr * sl_multiplier)
+            # Asegurar distancia mínima del precio
+            stop_loss = max(raw_sl, entry + max(atr * sl_multiplier, min_stop_distance))
             take_profit = signal['bb_middle']
 
         entry = symbol_info.normalize_price(entry)
