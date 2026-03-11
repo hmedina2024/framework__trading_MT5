@@ -192,10 +192,18 @@ class MovingAverageCrossStrategy(StrategyBase):
         Returns:
             True si se debe cerrar
         """
+        from datetime import datetime, timezone
+
+        # Tiempo mínimo de vida: no cerrar posiciones abiertas hace menos de 5 minutos
+        MIN_POSITION_AGE_SECONDS = 300
+        position_age = (datetime.now() - position.time_open.replace(tzinfo=None)).total_seconds()
+        if position_age < MIN_POSITION_AGE_SECONDS:
+            return False
+
         # Obtener datos actuales
         df = self.market_analyzer.get_candles(position.symbol, self.timeframe, count=50)
         
-        if df is None or df.empty:
+        if df is None or df.empty or len(df) < 3:
             return False
         
         # Calcular indicadores
@@ -203,13 +211,21 @@ class MovingAverageCrossStrategy(StrategyBase):
         df['ema_slow'] = self.market_analyzer.calculate_ema(df, self.slow_period)
         
         current = df.iloc[-1]
-        
-        # Cerrar si hay cruce contrario
-        if position.type == "BUY" and current['ema_fast'] < current['ema_slow']:
-            logger.info(f"Cerrando posición BUY por cruce bajista")
+        previous = df.iloc[-2]
+
+        # Exigir cruce REAL: la vela anterior estaba en dirección contraria
+        # Cerrar BUY solo si hay cruce bajista confirmado (antes fast > slow, ahora fast < slow)
+        if (position.type == "BUY" and
+                previous['ema_fast'] >= previous['ema_slow'] and
+                current['ema_fast'] < current['ema_slow']):
+            logger.info(f"Cerrando posición BUY por cruce bajista confirmado")
             return True
-        elif position.type == "SELL" and current['ema_fast'] > current['ema_slow']:
-            logger.info(f"Cerrando posición SELL por cruce alcista")
+
+        # Cerrar SELL solo si hay cruce alcista confirmado (antes fast < slow, ahora fast > slow)
+        elif (position.type == "SELL" and
+              previous['ema_fast'] <= previous['ema_slow'] and
+              current['ema_fast'] > current['ema_slow']):
+            logger.info(f"Cerrando posición SELL por cruce alcista confirmado")
             return True
         
         return False
