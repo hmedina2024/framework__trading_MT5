@@ -1,14 +1,21 @@
 """
 Estrategia MACD Histogram Momentum
-Estrategia de momentum basada en el histograma del MACD.
 
-Lógica:
-- COMPRA: Histograma MACD cambia de negativo a positivo (momentum alcista)
-           + MACD cruza por encima de la línea de señal
+Logica:
+- COMPRA: Histograma MACD cambia de negativo a positivo
+           + MACD cruza por encima de la linea de senal
            + Precio sobre EMA 200 (tendencia principal alcista)
-- VENTA: Histograma MACD cambia de positivo a negativo (momentum bajista)
-          + MACD cruza por debajo de la línea de señal
+           + |histograma| >= umbral minimo del simbolo (filtro de ruido)
+- VENTA: Histograma MACD cambia de positivo a negativo
+          + MACD cruza por debajo de la linea de senal
           + Precio bajo EMA 200 (tendencia principal bajista)
+          + |histograma| >= umbral minimo del simbolo (filtro de ruido)
+
+Correcciones vs version anterior:
+  - Filtro de magnitud minima del histograma por simbolo
+    Evita loops por cruces de ruido (ej: histograma oscilando +-0.000002)
+  - El cooldown post-trade y el guard de edad minima estan en StrategyBase
+    y se aplican automaticamente a esta y todas las estrategias
 """
 import pandas as pd
 from typing import Optional, Dict
@@ -20,19 +27,29 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Umbrales minimos de histograma por simbolo
+# El histograma de MACD escala con el precio del instrumento:
+#   GBPUSD / EURUSD / AUDUSD  (~1.x)   -> 0.0002  (100x el ruido observado)
+#   USDJPY                    (~150)    -> 0.02
+#   XAUUSD                    (~5000)   -> 0.5
+# ---------------------------------------------------------------------------
+HISTOGRAM_MIN_THRESHOLD = {
+    'EURUSD': 0.0002,
+    'GBPUSD': 0.0002,
+    'AUDUSD': 0.0002,
+    'USDJPY': 0.02,
+    'XAUUSD': 0.5,
+    'XAGUSD': 0.05,
+    'DEFAULT': 0.0002,
+}
+
+
 class MACDStrategy(StrategyBase):
     """
-    Estrategia de momentum con MACD Histogram.
-
-    Señal de COMPRA:
-    - Histograma MACD cruza de negativo a positivo
-    - MACD line > Signal line
-    - Precio por encima de EMA 200 (filtro de tendencia)
-
-    Señal de VENTA:
-    - Histograma MACD cruza de positivo a negativo
-    - MACD line < Signal line
-    - Precio por debajo de EMA 200 (filtro de tendencia)
+    Estrategia de momentum con MACD Histogram con filtro anti-ruido.
+    El cooldown post-trade y el limite diario de trades son gestionados
+    por StrategyBase automaticamente.
     """
 
     def __init__(
@@ -69,27 +86,43 @@ class MACDStrategy(StrategyBase):
             f"Signal: {signal_period}, EMA Trend: {ema_trend_period}"
         )
 
+    def _get_min_threshold(self, symbol: str) -> float:
+        """Umbral minimo de histograma para el simbolo dado."""
+        return HISTOGRAM_MIN_THRESHOLD.get(
+            symbol.upper(), HISTOGRAM_MIN_THRESHOLD['DEFAULT']
+        )
+
     def analyze(self, symbol: str, df: pd.DataFrame) -> Optional[Dict]:
         try:
-            # Calcular MACD (retorna tupla: macd_line, signal_line, histogram)
+            # Calcular indicadores
             macd_line, signal_line, histogram = self.market_analyzer.calculate_macd(
                 df, self.fast_period, self.slow_period, self.signal_period
             )
             df['macd'] = macd_line
             df['signal'] = signal_line
             df['histogram'] = histogram
-
-            # EMA de tendencia principal
             df['ema_trend'] = self.market_analyzer.calculate_ema(df, self.ema_trend_period)
 
-            current = df.iloc[-1]
+            current  = df.iloc[-1]
             previous = df.iloc[-2]
 
             if (pd.isna(current['macd']) or pd.isna(current['histogram']) or
                     pd.isna(current['ema_trend'])):
                 return None
 
-            # Señal de COMPRA: histograma cruza de negativo a positivo
+            # Filtro de magnitud: rechaza cruces de ruido
+            min_threshold = self._get_min_threshold(symbol)
+            if abs(current['histogram']) < min_threshold:
+                # Loguear solo si hay cruce (para no llenar el log en lateral)
+                if (previous['histogram'] < 0 < current['histogram'] or
+                        previous['histogram'] > 0 > current['histogram']):
+                    logger.info(
+                        f"{symbol}: cruce MACD rechazado por ruido — "
+                        f"histograma {current['histogram']:.6f} < umbral {min_threshold}"
+                    )
+                return None
+
+            # Senal de COMPRA
             if (previous['histogram'] < 0 and
                     current['histogram'] > 0 and
                     current['macd'] > current['signal'] and
@@ -101,14 +134,14 @@ class MACDStrategy(StrategyBase):
                 )
                 return {
                     'direction': 'BUY',
-                    'reason': f'MACD Histogram cruzó positivo ({current["histogram"]:.6f})',
+                    'reason': f'MACD Histogram cruzo positivo ({current["histogram"]:.6f})',
                     'macd': current['macd'],
                     'signal': current['signal'],
                     'histogram': current['histogram'],
                     'ema_trend': current['ema_trend']
                 }
 
-            # Señal de VENTA: histograma cruza de positivo a negativo
+            # Senal de VENTA
             elif (previous['histogram'] > 0 and
                   current['histogram'] < 0 and
                   current['macd'] < current['signal'] and
@@ -120,7 +153,7 @@ class MACDStrategy(StrategyBase):
                 )
                 return {
                     'direction': 'SELL',
-                    'reason': f'MACD Histogram cruzó negativo ({current["histogram"]:.6f})',
+                    'reason': f'MACD Histogram cruzo negativo ({current["histogram"]:.6f})',
                     'macd': current['macd'],
                     'signal': current['signal'],
                     'histogram': current['histogram'],
@@ -147,7 +180,7 @@ class MACDStrategy(StrategyBase):
         if signal['direction'] == 'BUY':
             entry = market_data.ask
             stop_loss = entry - (atr * 2.0)
-            take_profit = entry + (atr * 3.0)  # Ratio 1.5:1
+            take_profit = entry + (atr * 3.0)
         else:
             entry = market_data.bid
             stop_loss = entry + (atr * 2.0)
@@ -175,7 +208,10 @@ class MACDStrategy(StrategyBase):
         }
 
     def check_exit_conditions(self, position) -> bool:
-        """Cierra si el histograma MACD revierte"""
+        """
+        Cierra si el histograma MACD revierte.
+        El cooldown se activa automaticamente en StrategyBase.on_trade_closed().
+        """
         df = self.market_analyzer.get_candles(position.symbol, self.timeframe, count=50)
         if df is None or df.empty:
             return False
@@ -188,12 +224,11 @@ class MACDStrategy(StrategyBase):
         if pd.isna(current_hist):
             return False
 
-        # Cerrar BUY si histograma vuelve a negativo
         if position.type == "BUY" and current_hist < 0:
             logger.info(f"Cerrando BUY - MACD Histogram negativo: {current_hist:.6f}")
             return True
-        # Cerrar SELL si histograma vuelve a positivo
-        elif position.type == "SELL" and current_hist > 0:
+
+        if position.type == "SELL" and current_hist > 0:
             logger.info(f"Cerrando SELL - MACD Histogram positivo: {current_hist:.6f}")
             return True
 
