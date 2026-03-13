@@ -59,7 +59,11 @@ class StrategyBase(ABC):
             "wins": 0,
             "losses": 0,
         }
-        
+        # Registro de cuándo se abrió cada posición (ticket -> datetime)
+        self._position_open_times: Dict[int, datetime] = {}
+        # Tiempo mínimo que debe vivir una posición antes de evaluar salida
+        self.MIN_POSITION_AGE_SECONDS = 300  # 5 minutos
+
         logger.info(f"Estrategia '{name}' inicializada para {symbols}")
     
     @abstractmethod
@@ -236,7 +240,18 @@ class StrategyBase(ABC):
         for position in positions:
             if position.magic_number != self.magic_number:
                 continue
-            
+
+            # Guardia: no evaluar salida si la posición acaba de abrirse
+            open_time = self._position_open_times.get(position.ticket)
+            if open_time is not None:
+                age_seconds = (datetime.now() - open_time).total_seconds()
+                if age_seconds < self.MIN_POSITION_AGE_SECONDS:
+                    logger.debug(
+                        f"Posición {position.ticket} tiene {age_seconds:.0f}s — "
+                        f"esperando {self.MIN_POSITION_AGE_SECONDS}s antes de evaluar salida"
+                    )
+                    continue
+
             # Verificar condiciones de salida
             if self.check_exit_conditions(position):
                 logger.info(f"Cerrando posición {position.ticket} por condiciones de salida")
@@ -255,6 +270,7 @@ class StrategyBase(ABC):
         """
         logger.info(f"Trade abierto: {symbol} - Ticket: {result.ticket}")
         self._stats["trades_count"] += 1
+        self._position_open_times[result.ticket] = datetime.now()
         logger.info(f"Estadísticas de '{self.name}' actualizadas: "
                    f"Trades: {self._stats['trades_count']}")
     
@@ -267,6 +283,7 @@ class StrategyBase(ABC):
             result: Resultado del cierre
         """
         logger.info(f"Trade cerrado: {position.symbol} - Ticket: {position.ticket} - P&L: {position.profit}")
+        self._position_open_times.pop(position.ticket, None)
         self.update_stats(position.profit)
     
     def update_stats(self, profit: float) -> None:

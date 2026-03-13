@@ -3,7 +3,22 @@
  * Todas las llamadas a la API están centralizadas aquí
  */
 
+// Auto-configuración desde URL
+// Ejemplo: http://tuapp.com/?apiUrl=http://44.200.255.184:8000/api/v1
+(function() {
+    const params = new URLSearchParams(window.location.search);
+    const apiUrlFromParams = params.get('apiUrl');
+    if (apiUrlFromParams) {
+        localStorage.setItem('apiUrl', apiUrlFromParams);
+        // Limpiar la URL sin recargar la página
+        const cleanUrl = window.location.pathname;
+        window.history.replaceState({}, document.title, cleanUrl);
+        console.log('✅ API URL configurada desde URL:', apiUrlFromParams);
+    }
+})();
+
 const API_BASE = localStorage.getItem('apiUrl') || 'http://localhost:8000/api/v1';
+console.log('🔌 Conectando a:', API_BASE);
 
 // ============ HTTP CLIENT ============
 
