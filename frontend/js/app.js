@@ -7,7 +7,7 @@
 const AppState = {
     currentPage: 'dashboard',
     currentOrderType: 'BUY',
-    watchlist: ['EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD','USDJPY','AUDUSD'],
+    watchlist: ['EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD','AUDUSD','USDCAD','US30','BTCUSD'],
     refreshInterval: null,
     chart: null,
     chartSeries: null,

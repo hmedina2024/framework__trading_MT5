@@ -48,6 +48,10 @@
                 <i class="fas fa-list-alt"></i>
                 <span>Posiciones</span>
             </a>
+            <a href="#" class="nav-item" data-page="seguimiento">
+                <i class="fas fa-trophy"></i>
+                <span>Seguimiento</span>
+            </a>
             <a href="#" class="nav-item" data-page="settings">
                 <i class="fas fa-cog"></i>
                 <span>Configuración</span>
@@ -186,6 +190,9 @@
                                 <option value="USDJPY">USDJPY</option>
                                 <option value="XAUUSD">XAUUSD</option>
                                 <option value="AUDUSD">AUDUSD</option>
+                                <option value="USDCAD">USDCAD</option>
+                                <option value="US30">US30</option>
+                                <option value="BTCUSD">BTCUSD</option>
                             </select>
                             <div class="timeframe-buttons">
                                 <button class="tf-btn" data-tf="1">M1</button>
@@ -216,6 +223,9 @@
                                 <option value="USDJPY">USDJPY</option>
                                 <option value="XAUUSD">XAUUSD</option>
                                 <option value="AUDUSD">AUDUSD</option>
+                                <option value="USDCAD">USDCAD</option>
+                                <option value="US30">US30</option>
+                                <option value="BTCUSD">BTCUSD</option>
                             </select>
                         </div>
 
@@ -279,6 +289,9 @@
                         <option value="USDJPY">USDJPY</option>
                         <option value="XAUUSD">XAUUSD</option>
                         <option value="AUDUSD">AUDUSD</option>
+                        <option value="USDCAD">USDCAD</option>
+                        <option value="US30">US30</option>
+                                <option value="BTCUSD">BTCUSD</option>
                     </select>
                     <button class="btn-primary" onclick="runAnalysis()">
                         <i class="fas fa-search-dollar"></i> Analizar
@@ -342,22 +355,27 @@
                                     <option value="GBPUSD">GBPUSD</option>
                                     <option value="USDJPY">USDJPY</option>
                                     <option value="XAUUSD">XAUUSD</option>
-                                    <option value="AUDUSD">AUDUSD</option>                                    
+                                    <option value="AUDUSD">AUDUSD</option>
+                                    <option value="USDCAD">USDCAD</option>
+                                    <option value="US30">US30</option>
+                                <option value="BTCUSD">BTCUSD</option>
                                 </select>
                             </div>
                             <div class="form-group">
                                 <label>Tipo de Estrategia</label>
-                                <select id="strategyType" class="select-input">
-                                    <!-- Opciones cargadas dinámicamente desde el backend -->
+                                <select id="strategyType" class="select-input" onchange="updateStrategyDescription()">
                                     <option value="MA_CROSS">MA Cross + RSI (H1)</option>
                                     <option value="RSI">RSI Oversold/Overbought (H1)</option>
                                     <option value="BOLLINGER">Bollinger Bands Mean Reversion (H1)</option>
                                     <option value="MACD">MACD Histogram Momentum (H1)</option>
                                     <option value="BREAKOUT">Donchian Breakout (H4)</option>
+                                    <option value="SUPERTREND">Supertrend (H1)</option>
+                                    <option value="EMA_CROSS">EMA Crossover 9/21 (H1)</option>
+                                    <option value="WILLIAMS_R">Williams %R (H1)</option>
                                 </select>
                             </div>
                             <div class="strategy-description" id="strategyDescription">
-                                <p><strong>MA Cross + RSI:</strong> Detecta cruces de medias móviles (EMA 12/26) confirmados por RSI. Opera en H1.</p>
+                                <p id="strategyDescriptionText"><strong>MA Cross + RSI:</strong> Detecta cruces de medias móviles (EMA 12/26) confirmados por RSI. Opera en H1.</p>
                             </div>
                             <button class="btn-primary full-width" onclick="startStrategy()">
                                 <i class="fas fa-play"></i> Iniciar Bot
@@ -464,6 +482,171 @@
                 </div>
             </div>
 
+            <!-- ===== SEGUIMIENTO PAGE ===== -->
+            <div class="page" id="page-seguimiento">
+
+                <!-- Métricas globales -->
+                <div class="cards-grid" style="margin-bottom:1.5rem;">
+                    <div class="card card-balance">
+                        <div class="card-icon"><i class="fas fa-list-ol"></i></div>
+                        <div class="card-info">
+                            <span class="card-label">Total Trades</span>
+                            <span class="card-value" id="seg-total-trades">0</span>
+                        </div>
+                    </div>
+                    <div class="card card-equity">
+                        <div class="card-icon"><i class="fas fa-check-circle"></i></div>
+                        <div class="card-info">
+                            <span class="card-label">Win Rate Global</span>
+                            <span class="card-value" id="seg-winrate">0%</span>
+                        </div>
+                    </div>
+                    <div class="card card-profit">
+                        <div class="card-icon"><i class="fas fa-dollar-sign"></i></div>
+                        <div class="card-info">
+                            <span class="card-label">P&L Registrado</span>
+                            <span class="card-value" id="seg-pnl">$0.00</span>
+                        </div>
+                    </div>
+                    <div class="card card-margin">
+                        <div class="card-icon"><i class="fas fa-balance-scale"></i></div>
+                        <div class="card-info">
+                            <span class="card-label">Mejor Estrategia</span>
+                            <span class="card-value" id="seg-best" style="font-size:14px;">--</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div style="display:grid; grid-template-columns: 1fr 1fr; gap:1rem; margin-bottom:1rem;">
+
+                    <!-- Tabla de seguimiento por bot -->
+                    <div class="panel" style="grid-column: 1 / -1;">
+                        <div class="panel-header">
+                            <h3><i class="fas fa-table"></i> Registro por estrategia</h3>
+                            <div style="display:flex; gap:8px; align-items:center;">
+                                <select id="seg-filter-strat" class="select-input" style="font-size:12px; padding:4px 8px; height:auto;" onchange="segApplyFilter()">
+                                    <option value="">Todas las estrategias</option>
+                                    <option value="MA_CROSS">MA Cross + RSI</option>
+                                    <option value="RSI">RSI</option>
+                                    <option value="BOLLINGER">Bollinger Bands</option>
+                                    <option value="MACD">MACD</option>
+                                    <option value="BREAKOUT">Breakout</option>
+                                    <option value="SUPERTREND">Supertrend</option>
+                                    <option value="EMA_CROSS">EMA Crossover</option>
+                                    <option value="WILLIAMS_R">Williams %R</option>
+                                </select>
+                                <select id="seg-filter-sym" class="select-input" style="font-size:12px; padding:4px 8px; height:auto;" onchange="segApplyFilter()">
+                                    <option value="">Todos los activos</option>
+                                    <option value="EURUSD">EURUSD</option>
+                                    <option value="GBPUSD">GBPUSD</option>
+                                    <option value="USDJPY">USDJPY</option>
+                                    <option value="XAUUSD">XAUUSD</option>
+                                    <option value="AUDUSD">AUDUSD</option>
+                                    <option value="USDCAD">USDCAD</option>
+                                    <option value="US30">US30</option>
+                                <option value="BTCUSD">BTCUSD</option>
+                                </select>
+                                <button class="btn-sm" onclick="segAddRow()"><i class="fas fa-plus"></i> Agregar</button>
+                                <button class="btn-sm" onclick="segExportCSV()"><i class="fas fa-download"></i> CSV</button>
+                                <button class="btn-sm btn-danger" onclick="segClearAll()"><i class="fas fa-trash"></i></button>
+                            </div>
+                        </div>
+                        <div class="positions-table-wrapper">
+                            <table class="data-table" id="seg-table">
+                                <thead>
+                                    <tr>
+                                        <th>Fecha</th>
+                                        <th>Estrategia</th>
+                                        <th>Activo</th>
+                                        <th>Trades</th>
+                                        <th>Wins</th>
+                                        <th>Losses</th>
+                                        <th>Win %</th>
+                                        <th>Gan. prom</th>
+                                        <th>Pér. prom</th>
+                                        <th>R:R</th>
+                                        <th>P&L total</th>
+                                        <th>Estado</th>
+                                        <th></th>
+                                    </tr>
+                                </thead>
+                                <tbody id="seg-tbody">
+                                    <tr><td colspan="13" class="empty-row">Sin registros. Haz clic en "+ Agregar" para registrar un bot.</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                </div>
+
+                <!-- Modal agregar registro -->
+                <div id="seg-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.4); z-index:1000; align-items:center; justify-content:center;">
+                    <div style="background:var(--color-background-primary); border-radius:12px; border:0.5px solid var(--color-border-tertiary); padding:1.5rem; width:420px; max-width:95vw;">
+                        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+                            <h3 style="margin:0; font-size:15px;" id="seg-modal-title">Registrar bot</h3>
+                            <button onclick="document.getElementById('seg-modal').style.display='none'" style="background:none; border:none; cursor:pointer; font-size:16px; color:var(--color-text-secondary);">✕</button>
+                        </div>
+                        <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+                            <div>
+                                <label style="font-size:12px; color:var(--color-text-secondary); display:block; margin-bottom:4px;">Estrategia</label>
+                                <select id="seg-inp-strat" class="select-input" style="width:100%;">
+                                    <option value="MA_CROSS">MA Cross + RSI</option>
+                                    <option value="RSI">RSI</option>
+                                    <option value="BOLLINGER">Bollinger Bands</option>
+                                    <option value="MACD">MACD</option>
+                                    <option value="BREAKOUT">Breakout</option>
+                                    <option value="SUPERTREND">Supertrend</option>
+                                    <option value="EMA_CROSS">EMA Crossover</option>
+                                    <option value="WILLIAMS_R">Williams %R</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label style="font-size:12px; color:var(--color-text-secondary); display:block; margin-bottom:4px;">Activo</label>
+                                <select id="seg-inp-sym" class="select-input" style="width:100%;">
+                                    <option value="EURUSD">EURUSD</option>
+                                    <option value="GBPUSD">GBPUSD</option>
+                                    <option value="USDJPY">USDJPY</option>
+                                    <option value="XAUUSD">XAUUSD</option>
+                                    <option value="AUDUSD">AUDUSD</option>
+                                    <option value="USDCAD">USDCAD</option>
+                                    <option value="US30">US30</option>
+                                <option value="BTCUSD">BTCUSD</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label style="font-size:12px; color:var(--color-text-secondary); display:block; margin-bottom:4px;">Trades totales</label>
+                                <input type="number" id="seg-inp-trades" min="0" value="0" class="number-input full-width">
+                            </div>
+                            <div>
+                                <label style="font-size:12px; color:var(--color-text-secondary); display:block; margin-bottom:4px;">Wins</label>
+                                <input type="number" id="seg-inp-wins" min="0" value="0" class="number-input full-width">
+                            </div>
+                            <div>
+                                <label style="font-size:12px; color:var(--color-text-secondary); display:block; margin-bottom:4px;">Ganancia promedio ($)</label>
+                                <input type="number" id="seg-inp-avg-win" step="0.01" value="0" class="number-input full-width">
+                            </div>
+                            <div>
+                                <label style="font-size:12px; color:var(--color-text-secondary); display:block; margin-bottom:4px;">Pérdida promedio ($)</label>
+                                <input type="number" id="seg-inp-avg-loss" step="0.01" value="0" class="number-input full-width">
+                            </div>
+                            <div style="grid-column:1/-1;">
+                                <label style="font-size:12px; color:var(--color-text-secondary); display:block; margin-bottom:4px;">Fase</label>
+                                <select id="seg-inp-fase" class="select-input" style="width:100%;">
+                                    <option value="Fase 1">Fase 1</option>
+                                    <option value="Fase 2">Fase 2</option>
+                                    <option value="Fase 3">Fase 3</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:1.2rem;">
+                            <button class="btn-secondary" onclick="document.getElementById('seg-modal').style.display='none'">Cancelar</button>
+                            <button class="btn-primary" onclick="segSaveRow()">Guardar</button>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+
         </div>
     </main>
 
@@ -487,5 +670,219 @@
 
     <script src="js/api.js"></script>
     <script src="js/app.js"></script>
+    <script>
+        const STRATEGY_DESCRIPTIONS = {
+            "MA_CROSS":   "<strong>MA Cross + RSI:</strong> Detecta cruces de medias móviles EMA 12/26 confirmados por RSI. Clásico y confiable. Opera en H1.",
+            "RSI":        "<strong>RSI Oversold/Overbought:</strong> Opera rebotes desde zonas de sobreventa (&lt;30) y sobrecompra (&gt;70) del RSI. Opera en H1.",
+            "BOLLINGER":  "<strong>Bollinger Bands:</strong> Reversión a la media cuando el precio toca las bandas de Bollinger con confirmación de RSI. Opera en H1.",
+            "MACD":       "<strong>MACD Histogram:</strong> Sigue el momentum cuando el histograma MACD cambia de signo con filtro EMA 200. Opera en H1.",
+            "BREAKOUT":   "<strong>Donchian Breakout:</strong> Ruptura del canal de máximos/mínimos de 20 velas. Inspirado en Turtle Trading. Opera en H4.",
+            "SUPERTREND": "<strong>Supertrend:</strong> Señales de tendencia basadas en ATR con multiplicador 3.0. Pocas señales pero de alta calidad. Ideal para XAUUSD y USDJPY. Opera en H1.",
+            "EMA_CROSS":  "<strong>EMA Crossover 9/21:</strong> Cruce dorado y cruce de muerte de EMA 9/21 con filtro de tendencia EMA 200 y pendiente. La estrategia más usada en trading algorítmico profesional. Opera en H1.",
+            "WILLIAMS_R": "<strong>Williams %R:</strong> Detecta reversiones cuando el precio sale de zonas extremas de Williams %R (&lt;-80 sobreventa / &gt;-20 sobrecompra) con filtro EMA 50. Complementa a Bollinger. Opera en H1."
+        };
+
+        function updateStrategyDescription() {
+            const select = document.getElementById('strategyType');
+            const descEl = document.getElementById('strategyDescriptionText');
+            if (!select || !descEl) return;
+            const desc = STRATEGY_DESCRIPTIONS[select.value];
+            descEl.innerHTML = desc || '';
+        }
+
+        // Ejecutar al cargar la página
+        document.addEventListener('DOMContentLoaded', function() {
+            const select = document.getElementById('strategyType');
+            if (select) select.addEventListener('change', updateStrategyDescription);
+            updateStrategyDescription();
+        });
+    </script>
+
+    <script>
+    // ─── SEGUIMIENTO DE BOTS ──────────────────────────────────────────────────
+    const SEG_KEY = 'mt5_seguimiento_v1';
+    const STRAT_LABELS = {
+        MA_CROSS:'MA Cross + RSI', RSI:'RSI', BOLLINGER:'Bollinger Bands',
+        MACD:'MACD', BREAKOUT:'Breakout', SUPERTREND:'Supertrend',
+        EMA_CROSS:'EMA Crossover', WILLIAMS_R:'Williams %R'
+    };
+
+    function segLoad() {
+        try { return JSON.parse(localStorage.getItem(SEG_KEY) || '[]'); } catch(e) { return []; }
+    }
+    function segSave(data) {
+        localStorage.setItem(SEG_KEY, JSON.stringify(data));
+    }
+
+    function segStatusBadge(row) {
+        const wr = row.trades > 0 ? row.wins / row.trades : 0;
+        const rr = row.avgLoss > 0 ? row.avgWin / row.avgLoss : 0;
+        if (row.trades < 10) return '<span style="background:#E6F1FB;color:#185FA5;font-size:10px;padding:2px 8px;border-radius:4px;font-weight:500;">En prueba</span>';
+        if (wr >= 0.5 && rr >= 1.2) return '<span style="background:#EAF3DE;color:#3B6D11;font-size:10px;padding:2px 8px;border-radius:4px;font-weight:500;">Escalar</span>';
+        if (wr < 0.4 || rr < 0.8)  return '<span style="background:#FCEBEB;color:#A32D2D;font-size:10px;padding:2px 8px;border-radius:4px;font-weight:500;">Detener</span>';
+        return '<span style="background:#FAEEDA;color:#854F0B;font-size:10px;padding:2px 8px;border-radius:4px;font-weight:500;">Observar</span>';
+    }
+
+    function segRenderTable(rows) {
+        const tbody = document.getElementById('seg-tbody');
+        if (!tbody) return;
+        if (!rows.length) {
+            tbody.innerHTML = '<tr><td colspan="13" class="empty-row">Sin registros. Haz clic en "+ Agregar" para registrar un bot.</td></tr>';
+            return;
+        }
+        tbody.innerHTML = rows.map((r, i) => {
+            const losses = r.trades - r.wins;
+            const wr = r.trades > 0 ? ((r.wins / r.trades) * 100).toFixed(1) : '0.0';
+            const rr = r.avgLoss > 0 ? (r.avgWin / r.avgLoss).toFixed(2) : '--';
+            const pnl = (r.wins * r.avgWin) - (losses * r.avgLoss);
+            const pnlColor = pnl >= 0 ? '#3B6D11' : '#A32D2D';
+            const wrColor = parseFloat(wr) >= 50 ? '#3B6D11' : parseFloat(wr) >= 40 ? '#854F0B' : '#A32D2D';
+            return `<tr>
+                <td style="font-size:12px;color:var(--color-text-secondary);">${r.fecha}</td>
+                <td style="font-weight:500;font-size:12px;">${STRAT_LABELS[r.strat] || r.strat}</td>
+                <td style="font-family:monospace;font-size:12px;">${r.sym}</td>
+                <td style="text-align:center;">${r.trades}</td>
+                <td style="text-align:center;color:#3B6D11;">${r.wins}</td>
+                <td style="text-align:center;color:#A32D2D;">${losses}</td>
+                <td style="text-align:center;font-weight:500;color:${wrColor};">${wr}%</td>
+                <td style="text-align:center;color:#3B6D11;">$${r.avgWin.toFixed(2)}</td>
+                <td style="text-align:center;color:#A32D2D;">$${r.avgLoss.toFixed(2)}</td>
+                <td style="text-align:center;font-weight:500;">${rr}</td>
+                <td style="text-align:center;font-weight:500;color:${pnlColor};">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</td>
+                <td>${segStatusBadge(r)}</td>
+                <td><button onclick="segDeleteRow(${i})" style="background:none;border:none;cursor:pointer;color:#A32D2D;font-size:12px;" title="Eliminar"><i class="fas fa-trash"></i></button></td>
+            </tr>`;
+        }).join('');
+    }
+
+    function segUpdateSummary(rows) {
+        const totalTrades = rows.reduce((s, r) => s + r.trades, 0);
+        const totalWins   = rows.reduce((s, r) => s + r.wins, 0);
+        const wr = totalTrades > 0 ? ((totalWins / totalTrades) * 100).toFixed(1) : '0.0';
+        let totalPnl = 0;
+        rows.forEach(r => {
+            const losses = r.trades - r.wins;
+            totalPnl += (r.wins * r.avgWin) - (losses * r.avgLoss);
+        });
+
+        // mejor estrategia por P&L
+        const byStrat = {};
+        rows.forEach(r => {
+            const losses = r.trades - r.wins;
+            const pnl = (r.wins * r.avgWin) - (losses * r.avgLoss);
+            byStrat[r.strat] = (byStrat[r.strat] || 0) + pnl;
+        });
+        const bestStrat = Object.keys(byStrat).sort((a,b) => byStrat[b] - byStrat[a])[0];
+
+        const el = (id, v) => { const e = document.getElementById(id); if(e) e.textContent = v; };
+        el('seg-total-trades', totalTrades);
+        el('seg-winrate', wr + '%');
+        const pnlEl = document.getElementById('seg-pnl');
+        if (pnlEl) {
+            pnlEl.textContent = (totalPnl >= 0 ? '+' : '') + '$' + totalPnl.toFixed(2);
+            pnlEl.style.color = totalPnl >= 0 ? '#3B6D11' : '#A32D2D';
+        }
+        el('seg-best', bestStrat ? (STRAT_LABELS[bestStrat] || bestStrat) : '--');
+    }
+
+    function segRefresh() {
+        const rows = segLoad();
+        segRenderTable(rows);
+        segUpdateSummary(rows);
+    }
+
+    function segApplyFilter() {
+        const strat = document.getElementById('seg-filter-strat').value;
+        const sym   = document.getElementById('seg-filter-sym').value;
+        let rows = segLoad();
+        if (strat) rows = rows.filter(r => r.strat === strat);
+        if (sym)   rows = rows.filter(r => r.sym === sym);
+        segRenderTable(rows);
+        segUpdateSummary(rows);
+    }
+
+    function segAddRow() {
+        document.getElementById('seg-modal-title').textContent = 'Registrar bot';
+        document.getElementById('seg-inp-trades').value = 0;
+        document.getElementById('seg-inp-wins').value = 0;
+        document.getElementById('seg-inp-avg-win').value = 0;
+        document.getElementById('seg-inp-avg-loss').value = 0;
+        document.getElementById('seg-modal').style.display = 'flex';
+        document.getElementById('seg-modal')._editIdx = null;
+    }
+
+    function segSaveRow() {
+        const strat    = document.getElementById('seg-inp-strat').value;
+        const sym      = document.getElementById('seg-inp-sym').value;
+        const trades   = parseInt(document.getElementById('seg-inp-trades').value) || 0;
+        const wins     = parseInt(document.getElementById('seg-inp-wins').value) || 0;
+        const avgWin   = parseFloat(document.getElementById('seg-inp-avg-win').value) || 0;
+        const avgLoss  = parseFloat(document.getElementById('seg-inp-avg-loss').value) || 0;
+        const fase     = document.getElementById('seg-inp-fase').value;
+
+        if (wins > trades) { alert('Los wins no pueden superar el total de trades.'); return; }
+
+        const rows = segLoad();
+        const modal = document.getElementById('seg-modal');
+        const editIdx = modal._editIdx;
+        const now = new Date();
+        const fecha = now.toLocaleDateString('es-CO', {day:'2-digit', month:'2-digit', year:'2-digit'});
+
+        const entry = { strat, sym, trades, wins, avgWin, avgLoss, fase, fecha };
+
+        if (editIdx !== null && editIdx !== undefined) {
+            rows[editIdx] = entry;
+        } else {
+            rows.push(entry);
+        }
+
+        segSave(rows);
+        modal.style.display = 'none';
+        segRefresh();
+    }
+
+    function segDeleteRow(idx) {
+        if (!confirm('¿Eliminar este registro?')) return;
+        const rows = segLoad();
+        rows.splice(idx, 1);
+        segSave(rows);
+        segRefresh();
+    }
+
+    function segClearAll() {
+        if (!confirm('¿Eliminar TODOS los registros? Esta acción no se puede deshacer.')) return;
+        segSave([]);
+        segRefresh();
+    }
+
+    function segExportCSV() {
+        const rows = segLoad();
+        if (!rows.length) { alert('No hay registros para exportar.'); return; }
+        const header = 'Fecha,Estrategia,Activo,Trades,Wins,Losses,Win%,Gan.prom,Per.prom,RR,PnL,Fase';
+        const lines = rows.map(r => {
+            const losses = r.trades - r.wins;
+            const wr = r.trades > 0 ? ((r.wins / r.trades) * 100).toFixed(1) : '0.0';
+            const rr = r.avgLoss > 0 ? (r.avgWin / r.avgLoss).toFixed(2) : '0';
+            const pnl = ((r.wins * r.avgWin) - (losses * r.avgLoss)).toFixed(2);
+            return [r.fecha, STRAT_LABELS[r.strat]||r.strat, r.sym, r.trades, r.wins, losses, wr, r.avgWin.toFixed(2), r.avgLoss.toFixed(2), rr, pnl, r.fase].join(',');
+        });
+        const csv = [header, ...lines].join('
+');
+        const blob = new Blob([csv], {type:'text/csv'});
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'seguimiento_bots_' + new Date().toISOString().slice(0,10) + '.csv';
+        a.click();
+    }
+
+    // Inicializar al cargar
+    document.addEventListener('DOMContentLoaded', function() {
+        segRefresh();
+        // Cerrar modal de seguimiento al hacer clic fuera
+        document.getElementById('seg-modal').addEventListener('click', function(e) {
+            if (e.target === this) this.style.display = 'none';
+        });
+    });
+    </script>
 </body>
 </html>

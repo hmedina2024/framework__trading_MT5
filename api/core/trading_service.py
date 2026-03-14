@@ -12,6 +12,9 @@ from strategies import (
     BreakoutStrategy,
     StrategyBase,
 )
+from strategies.supertrend_strategy import SupertrendStrategy
+from strategies.ema_crossover_strategy import EMACrossoverStrategy
+from strategies.williams_r_strategy import WilliamsRStrategy
 from models import TradeRequest, TradeResult, OrderType
 from utils import get_logger
 import asyncio
@@ -146,6 +149,24 @@ class TradingService:
             "timeframe": "H4",
             "class": "BreakoutStrategy",
         },
+        "SUPERTREND": {
+            "name": "Supertrend",
+            "description": "Senales de tendencia basadas en ATR. Ideal para XAUUSD y USDJPY. Pocas senales pero de alta calidad.",
+            "timeframe": "H1",
+            "class": "SupertrendStrategy",
+        },
+        "EMA_CROSS": {
+            "name": "EMA Crossover",
+            "description": "Cruce dorado/muerte de EMA 9/21 con filtro EMA 200 y pendiente. La estrategia mas usada en trading algoritmico profesional.",
+            "timeframe": "H1",
+            "class": "EMACrossoverStrategy",
+        },
+        "WILLIAMS_R": {
+            "name": "Williams %R",
+            "description": "Reversiones desde zonas extremas de Williams %R con filtro EMA 50. Complementa a Bollinger para mayor cobertura.",
+            "timeframe": "H1",
+            "class": "WilliamsRStrategy",
+        },
     }
 
     def get_strategy_catalog(self) -> list:
@@ -199,6 +220,18 @@ class TradingService:
             elif strategy_type == "BREAKOUT":
                 strategy = BreakoutStrategy(
                     **common_args, timeframe=mt5.TIMEFRAME_H4
+                )
+            elif strategy_type == "SUPERTREND":
+                strategy = SupertrendStrategy(
+                    **common_args, timeframe=mt5.TIMEFRAME_H1
+                )
+            elif strategy_type == "EMA_CROSS":
+                strategy = EMACrossoverStrategy(
+                    **common_args, timeframe=mt5.TIMEFRAME_H1
+                )
+            elif strategy_type == "WILLIAMS_R":
+                strategy = WilliamsRStrategy(
+                    **common_args, timeframe=mt5.TIMEFRAME_H1
                 )
             else:
                 logger.error(f"Tipo de estrategia desconocida: {strategy_type}")

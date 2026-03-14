@@ -264,10 +264,85 @@ class MarketAnalyzer:
         supports = sorted(supports)[:num_levels]
         
         return {
-            'resistances': list(resistances),
-            'supports': list(supports)
+            'resistances': resistances.tolist(),
+            'supports': supports.tolist()
         }
     
+    def calculate_supertrend(
+        self,
+        df: pd.DataFrame,
+        period: int = 10,
+        multiplier: float = 3.0
+    ) -> Tuple[pd.Series, pd.Series]:
+        """
+        Calcula el indicador Supertrend.
+
+        Args:
+            df: DataFrame con columnas high, low, close
+            period: Periodo del ATR (default 10)
+            multiplier: Multiplicador del ATR (default 3.0)
+
+        Returns:
+            Tupla (supertrend_line, direction)
+            direction: +1 = tendencia alcista, -1 = tendencia bajista
+        """
+        atr = self.calculate_atr(df, period)
+        hl2 = (df['high'] + df['low']) / 2
+
+        upper_band = hl2 + (multiplier * atr)
+        lower_band = hl2 - (multiplier * atr)
+
+        supertrend = pd.Series(index=df.index, dtype=float)
+        direction  = pd.Series(index=df.index, dtype=int)
+
+        for i in range(1, len(df)):
+            # Banda superior
+            if upper_band.iloc[i] < upper_band.iloc[i - 1] or df['close'].iloc[i - 1] > upper_band.iloc[i - 1]:
+                upper_band.iloc[i] = upper_band.iloc[i]
+            else:
+                upper_band.iloc[i] = upper_band.iloc[i - 1]
+
+            # Banda inferior
+            if lower_band.iloc[i] > lower_band.iloc[i - 1] or df['close'].iloc[i - 1] < lower_band.iloc[i - 1]:
+                lower_band.iloc[i] = lower_band.iloc[i]
+            else:
+                lower_band.iloc[i] = lower_band.iloc[i - 1]
+
+            # Direccion
+            if pd.isna(supertrend.iloc[i - 1]):
+                direction.iloc[i] = 1
+            elif supertrend.iloc[i - 1] == upper_band.iloc[i - 1]:
+                direction.iloc[i] = -1 if df['close'].iloc[i] > upper_band.iloc[i] else 1
+            else:
+                direction.iloc[i] = 1 if df['close'].iloc[i] < lower_band.iloc[i] else -1
+
+            supertrend.iloc[i] = lower_band.iloc[i] if direction.iloc[i] == -1 else upper_band.iloc[i]
+
+        return supertrend, direction
+
+    def calculate_williams_r(
+        self,
+        df: pd.DataFrame,
+        period: int = 14
+    ) -> pd.Series:
+        """
+        Calcula Williams %R.
+        Rango: 0 a -100.
+          >= -20  = zona de sobrecompra
+          <= -80  = zona de sobreventa
+
+        Args:
+            df: DataFrame con columnas high, low, close
+            period: Periodo de lookback (default 14)
+
+        Returns:
+            Serie con valores de Williams %R
+        """
+        highest_high = df['high'].rolling(window=period).max()
+        lowest_low   = df['low'].rolling(window=period).min()
+        williams_r   = -100 * ((highest_high - df['close']) / (highest_high - lowest_low))
+        return williams_r
+
     def get_market_analysis(
         self,
         symbol: str,
