@@ -15,7 +15,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from typing import Optional, Dict, List
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pandas as pd
 
 from utils.logger import get_logger
@@ -153,6 +153,33 @@ class StrategyBase(ABC):
             return True
         return False
 
+    def _handle_market_closed(self):
+        """
+        Maneja el rechazo 10018 (Market closed).
+        Calcula cuanto tiempo falta para la proxima apertura del mercado
+        (domingo 22:00 UTC) y aplica ese cooldown a todos los simbolos,
+        evitando reintentos cada minuto durante el fin de semana.
+        """
+        now = datetime.now(timezone.utc)
+        # Calcular proximo domingo 22:00 UTC
+        # weekday(): lunes=0 ... sabado=5, domingo=6
+        days_until_sunday = (6 - now.weekday()) % 7
+        if days_until_sunday == 0 and now.hour >= 22:
+            days_until_sunday = 7  # ya paso el domingo de esta semana
+        next_open = now.replace(hour=22, minute=0, second=0, microsecond=0) + \
+                    timedelta(days=days_until_sunday)
+
+        hours_remaining = (next_open - now).total_seconds() / 3600
+        logger.info(
+            f"Mercado cerrado (fin de semana/feriado). "
+            f"Proxima apertura estimada: domingo 22:00 UTC "
+            f"({hours_remaining:.1f}h). Suspendiendo intentos."
+        )
+        # _cooldown_until usa datetime naive internamente — convertir
+        next_open_naive = next_open.replace(tzinfo=None)
+        for symbol in self.symbols:
+            self._cooldown_until[symbol] = next_open_naive
+
     def _is_position_old_enough(self, ticket: int) -> bool:
         """True si la posicion lleva al menos MIN_POSITION_AGE_SECONDS abierta."""
         open_time = self._position_open_times.get(ticket)
@@ -251,7 +278,13 @@ class StrategyBase(ABC):
                 self.on_trade_opened(symbol, result)
                 return True
             else:
-                logger.error(f"Error al ejecutar senal: {result.error_message}")
+                # Codigo 10018 = Market closed (fin de semana o feriado)
+                # Activar cooldown global en TODOS los simbolos para no reintentar
+                # cada minuto. Se calcula hasta el proximo domingo 22:00 UTC.
+                if getattr(result, 'error_code', None) == 10018:
+                    self._handle_market_closed()
+                else:
+                    logger.error(f"Error al ejecutar senal: {result.error_message}")
                 return False
 
         except Exception as e:
