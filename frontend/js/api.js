@@ -3,22 +3,11 @@
  * Todas las llamadas a la API están centralizadas aquí
  */
 
-// Auto-configuración desde URL
-// Ejemplo: http://tuapp.com/?apiUrl=http://44.200.255.184:8000/api/v1
-(function() {
-    const params = new URLSearchParams(window.location.search);
-    const apiUrlFromParams = params.get('apiUrl');
-    if (apiUrlFromParams) {
-        localStorage.setItem('apiUrl', apiUrlFromParams);
-        // Limpiar la URL sin recargar la página
-        const cleanUrl = window.location.pathname;
-        window.history.replaceState({}, document.title, cleanUrl);
-        console.log('✅ API URL configurada desde URL:', apiUrlFromParams);
-    }
-})();
-
-const API_BASE = localStorage.getItem('apiUrl') || 'http://localhost:8000/api/v1';
-console.log('🔌 Conectando a:', API_BASE);
+// Bug fix: leer la URL en el momento de cada petición, no al cargar la página.
+// Así funciona correctamente tanto en localhost como en EC2 sin F5 adicional.
+function getApiBase() {
+    return localStorage.getItem('apiUrl') || 'http://localhost:8000/api/v1';
+}
 
 // ============ HTTP CLIENT ============
 
@@ -29,8 +18,9 @@ async function apiRequest(endpoint, method = 'GET', body = null) {
     };
     if (body) options.body = JSON.stringify(body);
 
+    const base = getApiBase();
     try {
-        const response = await fetch(`${API_BASE}${endpoint}`, options);
+        const response = await fetch(`${base}${endpoint}`, options);
         if (!response.ok) {
             const error = await response.json().catch(() => ({ detail: response.statusText }));
             throw new Error(error.detail || `HTTP ${response.status}`);
@@ -45,9 +35,12 @@ async function apiRequest(endpoint, method = 'GET', body = null) {
 // ============ HEALTH ============
 
 const HealthAPI = {
-    check: () => fetch(`${API_BASE.replace('/api/v1', '')}/api/v1/health`)
-        .then(r => r.json())
-        .catch(() => ({ status: 'offline', mt5_connected: false }))
+    check: () => {
+        const base = getApiBase().replace('/api/v1', '');
+        return fetch(`${base}/api/v1/health`)
+            .then(r => r.json())
+            .catch(() => ({ status: 'offline', mt5_connected: false }));
+    }
 };
 
 // ============ ACCOUNT ============
@@ -60,10 +53,13 @@ const AccountAPI = {
 // ============ MARKET ============
 
 const MarketAPI = {
-    getTicker: (symbol) => apiRequest(`/market/ticker/${symbol}`),
-    getSymbols: () => apiRequest('/market/symbols'),
+    getTicker:   (symbol) => apiRequest(`/market/ticker/${symbol}`),
+    getSymbols:  () => apiRequest('/market/symbols'),
     getAnalysis: (symbol, timeframe = 16385) =>
         apiRequest(`/market/analysis/${symbol}?timeframe=${timeframe}`),
+    // Endpoint de velas OHLC para el gráfico — faltaba en la versión anterior
+    getCandles:  (symbol, timeframe = 60, count = 200) =>
+        apiRequest(`/market/candles/${symbol}?timeframe=${timeframe}&count=${count}`),
 };
 
 // ============ ORDERS ============

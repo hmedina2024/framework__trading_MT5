@@ -12,8 +12,16 @@ const AppState = {
     chart: null,
     chartSeries: null,
     currentChartSymbol: 'EURUSD',
-    currentChartTimeframe: 60,  // H1 por defecto (en minutos)
-    initialDataLoaded: false, // Control para la carga inicial de datos
+    currentChartTimeframe: 60,
+    initialDataLoaded: false,
+    _refreshTick: 0,
+};
+
+// Frecuencia de actualización por tipo de dato (en ciclos de 3s)
+const REFRESH_RATES = {
+    prices:     1,   // cada 3s  — precios y watchlist
+    positions:  3,   // cada 9s  — posiciones abiertas
+    account:    10,  // cada 30s — balance, bots
 };
 
 // Mapa de timeframe (minutos) a nombre MT5
@@ -32,10 +40,9 @@ const TIMEFRAME_MAP = {
 document.addEventListener('DOMContentLoaded', () => {
     initNavigation();
     initChart();
-    // loadDashboard(); // Se elimina la carga directa para esperar la confirmación de conexión
-    startAutoRefresh();
-    checkServerHealth(); // Esta función se encargará de la carga inicial
-    loadStrategyCatalog();  // Cargar catálogo de estrategias desde el backend
+    // startAutoRefresh() se llama desde checkServerHealth() una vez confirmada la conexión
+    checkServerHealth();
+    loadStrategyCatalog();
 });
 
 // ============ NAVEGACIÓN ============
@@ -66,12 +73,13 @@ function navigateTo(page) {
 
     // Actualizar título
     const titles = {
-        dashboard: 'Dashboard',
-        trading: 'Terminal de Trading',
-        analysis: 'Análisis de Mercado',
-        strategies: 'Estrategias Automáticas',
-        positions: 'Posiciones',
-        settings: 'Configuración'
+        dashboard:   'Dashboard',
+        trading:     'Terminal de Trading',
+        analysis:    'Análisis de Mercado',
+        strategies:  'Estrategias Automáticas',
+        positions:   'Posiciones',
+        seguimiento: 'Seguimiento de Bots',
+        settings:    'Configuración'
     };
     document.getElementById('pageTitle').textContent = titles[page] || page;
 
@@ -81,35 +89,47 @@ function navigateTo(page) {
 
 function loadCurrentPage() {
     switch (AppState.currentPage) {
-        case 'dashboard':   loadDashboard(); break;
-        case 'trading':     loadTradingPage(); break;
-        case 'analysis':    break; // Manual trigger
-        case 'strategies':  loadStrategies(); break;
-        case 'positions':   loadAllPositions(); break;
-        case 'settings':    loadSettings(); break;
+        case 'dashboard':    loadDashboard(); break;
+        case 'trading':      loadTradingPage(); break;
+        case 'analysis':     break;
+        case 'strategies':   loadStrategies(); break;
+        case 'positions':    loadAllPositions(); break;
+        case 'seguimiento':  if (typeof segRefresh === 'function') segRefresh(); break;
+        case 'settings':     loadSettings(); break;
     }
 }
 
-// ============ AUTO REFRESH ============
+// ============ AUTO REFRESH INTELIGENTE ============
 
 function startAutoRefresh() {
-    // Si ya existe un intervalo, lo limpiamos para evitar duplicados
-    if (AppState.refreshInterval) {
-        clearInterval(AppState.refreshInterval);
-    }
-    
-    // Establecer el nuevo intervalo
-    AppState.refreshInterval = setInterval(() => {
-        // Solo refrescar si el servidor está conectado
-        const statusDot = document.getElementById('statusDot');
-        if (statusDot && statusDot.classList.contains('connected')) {
-            loadCurrentPage();
-            // Ya no es necesario llamar a updateWatchlistPrices() aquí,
-            // porque loadDashboard() (parte de loadCurrentPage) ya lo hace.
-        } else {
-            console.log('Auto-refresh pausado: MT5 no conectado.');
+    if (AppState.refreshInterval) clearInterval(AppState.refreshInterval);
+
+    AppState.refreshInterval = setInterval(async () => {
+        const isConnected = document.getElementById('statusDot')
+            ?.classList.contains('connected');
+        if (!isConnected) return;
+
+        AppState._refreshTick++;
+        const tick = AppState._refreshTick;
+        const page = AppState.currentPage;
+
+        // Precios: cada 3s
+        if (tick % REFRESH_RATES.prices === 0) {
+            if (page === 'dashboard') updateWatchlistPrices();
+            if (page === 'trading')   updateChartPrices(AppState.currentChartSymbol);
         }
-    }, 5000); // Cada 5 segundos
+        // Posiciones: cada 9s
+        if (tick % REFRESH_RATES.positions === 0) {
+            if (page === 'dashboard') loadPositions();
+            if (page === 'positions') loadAllPositions();
+        }
+        // Cuenta y bots: cada 30s
+        if (tick % REFRESH_RATES.account === 0) {
+            if (page === 'dashboard' || page === 'trading')     loadAccountInfo();
+            if (page === 'dashboard' || page === 'strategies')  loadStrategiesStatus();
+            if (page === 'strategies') loadStrategies();
+        }
+    }, 3000);
 }
 
 // ============ HEALTH CHECK ============
@@ -117,34 +137,48 @@ function startAutoRefresh() {
 async function checkServerHealth() {
     try {
         const health = await HealthAPI.check();
-        const dot = document.getElementById('statusDot');
-        const text = document.getElementById('statusText');
-        const serverDot = document.getElementById('serverDot');
+        const dot        = document.getElementById('statusDot');
+        const text       = document.getElementById('statusText');
+        const serverDot  = document.getElementById('serverDot');
         const serverText = document.getElementById('serverStatusText');
 
         if (health.mt5_connected) {
-            if (dot) dot.className = 'status-dot connected';
-            if (text) text.textContent = 'MT5 Conectado';
-            if (serverDot) serverDot.className = 'status-dot connected';
+            if (dot)        dot.className        = 'status-dot connected';
+            if (text)       text.textContent     = 'MT5 Conectado';
+            if (serverDot)  serverDot.className  = 'status-dot connected';
             if (serverText) serverText.textContent = 'Servidor Online';
 
-            // Si es la primera vez que se conecta, cargar los datos del dashboard
+            // Carga inicial: si aún no se han cargado datos, cargarlos ahora.
+            // Se evalúa en cada health check para recuperarse de fallos de red
+            // en el primer intento (servidor tardó, EC2 frío, etc.)
             if (!AppState.initialDataLoaded) {
-                console.log("Conexión con MT5 establecida. Realizando carga inicial de datos...");
-                loadDashboard();
+                console.log('MT5 conectado — cargando datos iniciales...');
                 AppState.initialDataLoaded = true;
+                await loadDashboard();
+                // Arrancar el auto-refresh solo después de la carga inicial exitosa
+                startAutoRefresh();
             }
-
         } else {
-            if (dot) dot.className = 'status-dot disconnected';
-            if (text) text.textContent = health.status === 'offline' ? 'Servidor Offline' : 'MT5 Desconectado';
-            if (serverDot) serverDot.className = 'status-dot disconnected';
-            if (serverText) serverText.textContent = health.status === 'offline' ? 'Servidor Offline' : 'Servidor Online, MT5 Desconectado';
+            if (dot)        dot.className        = 'status-dot disconnected';
+            if (text)       text.textContent     = health.status === 'offline'
+                ? 'Servidor Offline' : 'MT5 Desconectado';
+            if (serverDot)  serverDot.className  = 'status-dot disconnected';
+            if (serverText) serverText.textContent = health.status === 'offline'
+                ? 'Servidor Offline' : 'Servidor Online, MT5 Desconectado';
+
+            // Si se pierde la conexión después de haber cargado,
+            // permitir reintentar la carga inicial cuando vuelva
+            if (AppState.initialDataLoaded) {
+                AppState.initialDataLoaded = false;
+                if (AppState.refreshInterval) {
+                    clearInterval(AppState.refreshInterval);
+                    AppState.refreshInterval = null;
+                }
+            }
         }
     } catch (err) {
-        console.warn("Error en Health Check:", err.message);
+        console.warn('Health check falló:', err.message);
     } finally {
-        // Repetir cada 10 segundos
         setTimeout(checkServerHealth, 10000);
     }
 }

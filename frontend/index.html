@@ -7,7 +7,7 @@
     <link rel="stylesheet" href="css/styles.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <!-- Lightweight Charts de TradingView -->
-    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    <script src="https://unpkg.com/lightweight-charts@3.8.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
     <!-- Sidebar -->
@@ -866,8 +866,7 @@
             const pnl = ((r.wins * r.avgWin) - (losses * r.avgLoss)).toFixed(2);
             return [r.fecha, STRAT_LABELS[r.strat]||r.strat, r.sym, r.trades, r.wins, losses, wr, r.avgWin.toFixed(2), r.avgLoss.toFixed(2), rr, pnl, r.fase].join(',');
         });
-        const csv = [header, ...lines].join('
-');
+        const csv = [header, ...lines].join('');
         const blob = new Blob([csv], {type:'text/csv'});
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob);
