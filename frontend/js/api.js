@@ -65,9 +65,13 @@ const MarketAPI = {
 // ============ ORDERS ============
 
 const OrdersAPI = {
-    getPositions: () => apiRequest('/orders/'),
-    createOrder: (orderData) => apiRequest('/orders/create', 'POST', orderData),
+    getPositions:  () => apiRequest('/orders/'),
+    createOrder:   (orderData) => apiRequest('/orders/create', 'POST', orderData),
     closePosition: (ticket) => apiRequest(`/orders/close/${ticket}`, 'POST'),
+    getHistory:    (days = 30, symbol = null) => {
+        const params = `days=${days}${symbol ? '&symbol=' + symbol : ''}`;
+        return apiRequest(`/orders/history?${params}`);
+    },
 };
 
 // ============ STRATEGIES ============

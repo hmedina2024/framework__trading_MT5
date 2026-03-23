@@ -33,22 +33,25 @@ class MarketAnalyzer:
         count: int = 100
     ) -> Optional[pd.DataFrame]:
         """
-        Obtiene velas históricas
-        
-        Args:
-            symbol: Símbolo del instrumento
-            timeframe: Timeframe (mt5.TIMEFRAME_*)
-            count: Número de velas
-            
-        Returns:
-            DataFrame con las velas o None si hay error
+        Obtiene exactamente `count` velas CERRADAS.
+
+        MT5 siempre incluye la vela en curso (abierta) como ultima entrada.
+        La solucion robusta es pedir count+1 velas y descartar siempre la
+        ultima — independientemente de timezone o cambios de horario de verano.
+        Esto funciona con cualquier broker y en cualquier zona horaria.
         """
+        # Pedir 1 vela extra — la ultima siempre es la vela en curso (abierta)
         start_date = datetime.now()
-        df = self.connector.get_historical_data(symbol, timeframe, start_date, count=count)
-        
-        if df is not None and not df.empty:
-            logger.debug(f"Obtenidas {len(df)} velas de {symbol}")
-        
+        df = self.connector.get_historical_data(symbol, timeframe, start_date, count=count + 1)
+
+        if df is None or df.empty:
+            return df
+
+        # Descartar siempre la ultima vela (esta abierta, sus valores cambian cada tick)
+        df = df.iloc[:-1].reset_index(drop=True)
+
+        logger.debug(f"Obtenidas {len(df)} velas cerradas de {symbol} "
+                     f"(ultima: {df['time'].iloc[-1]})")
         return df
     
     def calculate_sma(self, df: pd.DataFrame, period: int, column: str = 'close') -> pd.Series:

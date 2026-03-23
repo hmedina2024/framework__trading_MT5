@@ -241,6 +241,13 @@ class PlatformConnector:
                 logger.error(f"No se pudo obtener tick para {symbol}: {mt5.last_error()}")
                 return None
             
+            # Obtener daily change desde symbol_info (igual al que muestra MT5)
+            info = mt5.symbol_info(symbol)
+            daily_change = 0.0
+            if info is not None:
+                # price_change es el cambio porcentual diario que muestra MT5
+                daily_change = round(getattr(info, 'price_change', 0.0), 2)
+
             return MarketData(
                 symbol=symbol,
                 bid=tick.bid,
@@ -248,7 +255,8 @@ class PlatformConnector:
                 last=tick.last,
                 volume=tick.volume,
                 time=datetime.fromtimestamp(tick.time),
-                spread=tick.ask - tick.bid
+                spread=tick.ask - tick.bid,
+                daily_change=daily_change
             )
             
         except Exception as e:
@@ -361,6 +369,107 @@ class PlatformConnector:
             logger.error(f"Error al obtener datos históricos: {str(e)}", exc_info=True)
             return None
     
+
+    def get_trade_history(
+        self,
+        from_date=None,
+        to_date=None,
+        symbol=None
+    ):
+        """
+        Obtiene historial de deals cerrados de MT5.
+        Resuelve la estrategia por magic number — evita el problema de
+        que MT5 sobreescriba el comment con "tp" o "sl" al cerrar.
+        """
+        if not self.ensure_connection():
+            return []
+
+        try:
+            from datetime import timedelta
+            now = datetime.now()
+            date_from = from_date or (now - timedelta(days=30))
+            date_to   = to_date   or now
+
+            deals = mt5.history_deals_get(date_from, date_to)
+            if deals is None:
+                logger.warning(f"No se pudo obtener historial: {mt5.last_error()}")
+                return []
+
+            # Magic number → estrategia (debe coincidir con trading_service.py)
+            MAGIC_TO_STRATEGY = {}
+            bases = {
+                210000:'MA_CROSS', 220000:'RSI',       230000:'BOLLINGER',
+                240000:'MACD',     250000:'BREAKOUT',  260000:'SUPERTREND',
+                270000:'EMA_CROSS',280000:'WILLIAMS_R',290000:'DESCONOCIDA',
+            }
+            for base, name in bases.items():
+                for offset in range(1, 10):
+                    MAGIC_TO_STRATEGY[base + offset] = name
+
+            # Mapa order → comment del deal de ENTRADA (entry=0)
+            # para recuperar el comment antes de que MT5 lo pise con "tp"/"sl"
+            entry_comments = {}
+            for d in deals:
+                if d.symbol and d.entry == 0:
+                    entry_comments[d.order] = d.comment or ''
+
+            result = []
+            for d in deals:
+                if not d.symbol:
+                    continue
+                if d.entry != 1:  # solo deals de salida tienen profit real
+                    continue
+                if symbol and d.symbol != symbol:
+                    continue
+
+                # Resolver nombre de estrategia por magic number (método principal)
+                strategy_name = MAGIC_TO_STRATEGY.get(d.magic)
+                if not strategy_name:
+                    # Fallback: parsear comment del deal de entrada buscando nombre
+                    orig = entry_comments.get(d.order, d.comment or '')
+                    c = orig.upper()
+                    if   'MACD'       in c:                     strategy_name = 'MACD'
+                    elif 'BOLLINGER'  in c or 'BB MEAN' in c:  strategy_name = 'BOLLINGER'
+                    elif 'SUPERTREND' in c:                     strategy_name = 'SUPERTREND'
+                    elif 'EMA CROSS'  in c or 'EMA_CROSS' in c: strategy_name = 'EMA_CROSS'
+                    elif 'WILLIAMS'   in c or 'W%R' in c:      strategy_name = 'WILLIAMS_R'
+                    elif 'BREAKOUT'   in c or 'DONCHIAN' in c: strategy_name = 'BREAKOUT'
+                    elif 'MA CROSS'   in c or 'MA_CROSS' in c: strategy_name = 'MA_CROSS'
+                    elif 'RSI'        in c:                     strategy_name = 'RSI'
+                    else: strategy_name = None
+
+                # Saltar deals sin estrategia reconocida (manuales, magic desconocido)
+                if not strategy_name:
+                    continue
+
+
+                result.append({
+                    'ticket':    d.ticket,
+                    'order':     d.order,
+                    'symbol':    d.symbol,
+                    'type':      'BUY' if d.type == 0 else 'SELL',
+                    'volume':    d.volume,
+                    'price':     d.price,
+                    'profit':    d.profit,
+                    'commission': getattr(d, 'commission', 0.0),
+                    'swap':      getattr(d, 'swap', 0.0),
+                    'magic':     d.magic,
+                    'strategy':  strategy_name,
+                    'comment':   d.comment or '',
+                    'time':      datetime.fromtimestamp(d.time).isoformat(),
+                })
+
+            logger.info(
+                f"Historial: {len(result)} deals cerrados "
+                f"({date_from.date()} — {date_to.date()})"
+            )
+            return result
+
+        except Exception as e:
+            logger.error(f"Error al obtener historial: {str(e)}", exc_info=True)
+            return []
+
+
     def __enter__(self):
         """Context manager entry"""
         self.connect()

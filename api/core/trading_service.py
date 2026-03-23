@@ -188,9 +188,27 @@ class TradingService:
             return False
 
         try:
-            # Generar un número mágico único para esta instancia de estrategia
-            unique_magic_number = random.randint(10000, 999999)
-            logger.info(f"Asignando Magic Number único {unique_magic_number} a la estrategia {strategy_id}")
+            # Magic number fijo y determinista: base por estrategia + offset por simbolo
+            # Esto permite identificar la estrategia desde el historial de MT5
+            # aunque el comment haya sido sobreescrito por "tp" o "sl"
+            STRATEGY_MAGIC_BASE = {
+                'MA_CROSS':   210000,
+                'RSI':        220000,
+                'BOLLINGER':  230000,
+                'MACD':       240000,
+                'BREAKOUT':   250000,
+                'SUPERTREND': 260000,
+                'EMA_CROSS':  270000,
+                'WILLIAMS_R': 280000,
+            }
+            SYMBOL_OFFSET = {
+                'EURUSD': 1, 'GBPUSD': 2, 'USDJPY': 3, 'XAUUSD': 4,
+                'AUDUSD': 5, 'USDCAD': 6, 'US30':   7, 'BTCUSD': 8,
+            }
+            base   = STRATEGY_MAGIC_BASE.get(strategy_type, 290000)
+            offset = SYMBOL_OFFSET.get(symbol, 9)
+            unique_magic_number = base + offset
+            logger.info(f"Magic Number fijo {unique_magic_number} asignado a {strategy_id} ({strategy_type}+{symbol})")
 
             common_args = dict(
                 connector=self.connector,

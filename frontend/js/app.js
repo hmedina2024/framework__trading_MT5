@@ -285,13 +285,14 @@ async function updateWatchlistPrices() {
     for (const symbol of AppState.watchlist) {
         try {
             const data = await MarketAPI.getTicker(symbol);
-            const change = ((data.bid - data.ask) / data.ask * 100).toFixed(2);
+            const change = data.daily_change !== undefined ? data.daily_change : 0;
+            const digits = data.digits !== undefined ? data.digits : 5;
             items.push(`
                 <div class="watchlist-item" onclick="navigateTo('trading')">
                     <span class="watchlist-symbol">${symbol}</span>
-                    <span class="watchlist-price">${data.bid.toFixed(5)}</span>
+                    <span class="watchlist-price">${data.bid.toFixed(digits)}</span>
                     <span class="watchlist-change ${change >= 0 ? 'up' : 'down'}">
-                        ${change >= 0 ? '▲' : '▼'} ${Math.abs(change)}%
+                        ${change >= 0 ? '▲' : '▼'} ${Math.abs(change).toFixed(2)}%
                     </span>
                 </div>
             `);
@@ -874,4 +875,83 @@ function formatCurrency(amount, currency = 'USD') {
     const formatted = Math.abs(amount).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     const sign = amount < 0 ? '-' : '';
     return `${sign}$${formatted}`;
+}
+
+// ============ SEGUIMIENTO — CARGA AUTOMÁTICA DESDE HISTORIAL MT5 ============
+
+/**
+ * Carga el historial de deals cerrados desde MT5 y calcula las métricas
+ * de seguimiento por estrategia + símbolo automáticamente.
+ * Fusiona con los registros manuales existentes sin duplicar.
+ */
+async function segLoadFromHistory(days = 30) {
+    const btn = document.getElementById('seg-btn-sync');
+    if (btn) { btn.disabled = true; btn.textContent = 'Sincronizando...'; }
+
+    try {
+        const data = await OrdersAPI.getHistory(days);
+        if (!data || !data.deals || data.deals.length === 0) {
+            showToast('No hay historial de trades en los últimos ' + days + ' días', 'info');
+            return;
+        }
+
+        // Agrupar deals por strategy + symbol
+        // El campo "strategy" viene resuelto desde el backend via magic number
+        // — nunca será "tp" ni "sl"
+        const groups = {};
+        for (const deal of data.deals) {
+            const strat = deal.strategy || 'DESCONOCIDA';
+            const key   = `${strat}_${deal.symbol}`;
+            if (!groups[key]) {
+                groups[key] = { symbol: deal.symbol, strat,
+                                wins: 0, losses: 0,
+                                totalWin: 0, totalLoss: 0, trades: 0,
+                                lastDate: deal.time };
+            }
+            const g = groups[key];
+            g.trades++;
+            const net = deal.profit + (deal.commission || 0) + (deal.swap || 0);
+            if (net >= 0) { g.wins++;   g.totalWin  += net; }
+            else          { g.losses++; g.totalLoss += Math.abs(net); }
+            if (deal.time > g.lastDate) g.lastDate = deal.time;
+        }
+
+        if (Object.keys(groups).length === 0) {
+            showToast('Historial encontrado pero sin trades cerrados aún', 'info');
+            return;
+        }
+
+        // Cargar registros existentes y agregar/actualizar
+        const existing = segLoad();
+        let added = 0, updated = 0;
+
+        for (const [key, g] of Object.entries(groups)) {
+            if (g.trades === 0) continue;
+            const avgWin  = g.wins   > 0 ? g.totalWin  / g.wins   : 0;
+            const avgLoss = g.losses > 0 ? g.totalLoss / g.losses : 0;
+            const fecha   = new Date(g.lastDate).toLocaleDateString('es-CO',
+                            { day: '2-digit', month: '2-digit', year: '2-digit' });
+
+            const idx = existing.findIndex(r => r.sym === g.symbol && r.strat === g.strat);
+            const entry = { strat: g.strat, sym: g.symbol, trades: g.trades,
+                            wins: g.wins, avgWin: parseFloat(avgWin.toFixed(2)),
+                            avgLoss: parseFloat(avgLoss.toFixed(2)),
+                            fase: 'Fase 1', fecha };
+
+            if (idx >= 0) { existing[idx] = entry; updated++; }
+            else          { existing.push(entry); added++; }
+        }
+
+        segSave(existing);
+        segRefresh();
+        showToast(
+            `Sincronizado: ${added} nuevos, ${updated} actualizados (${data.count} deals, ${days} días)`,
+            'success'
+        );
+    } catch (err) {
+        showToast('Error al sincronizar historial: ' + err.message, 'error');
+        console.error('segLoadFromHistory error:', err);
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = '⟳ Sincronizar MT5'; }
+    }
 }

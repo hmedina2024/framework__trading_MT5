@@ -34,14 +34,19 @@ logger = get_logger(__name__)
 #   USDJPY                    (~150)    -> 0.02
 #   XAUUSD                    (~5000)   -> 0.5
 # ---------------------------------------------------------------------------
+# DEMO: umbrales reducidos al 50% para capturar mas senales y evaluar estrategia.
+# Produccion: EURUSD/GBPUSD/AUDUSD=0.0002, USDJPY=0.02, XAUUSD=0.5
 HISTOGRAM_MIN_THRESHOLD = {
-    'EURUSD': 0.0002,
-    'GBPUSD': 0.0002,
-    'AUDUSD': 0.0002,
-    'USDJPY': 0.02,
-    'XAUUSD': 0.5,
-    'XAGUSD': 0.05,
-    'DEFAULT': 0.0002,
+    'EURUSD': 0.0001,
+    'GBPUSD': 0.0001,
+    'AUDUSD': 0.0001,
+    'USDJPY': 0.01,
+    'XAUUSD': 0.15,
+    'USDCAD': 0.0001,
+    'US30':   5.0,
+    'BTCUSD': 10.0,
+    'XAGUSD': 0.02,
+    'DEFAULT': 0.0001,
 }
 
 

@@ -134,6 +134,36 @@ class BollingerBandsStrategy(StrategyBase):
             df['bb_lower'] = bb_lower
             df['rsi'] = self.market_analyzer.calculate_rsi(df, self.rsi_period)
 
+            # --- FILTRO DE TENDENCIA FUERTE ---
+            # Bollinger es una estrategia de reversión — no funciona en tendencias.
+            # Calcular pendiente de EMA200: si es muy pronunciada, hay tendencia
+            # y bloqueamos nuevas señales para evitar operar contra la tendencia.
+            ema200 = self.market_analyzer.calculate_ema(df, 200)
+            ema50  = self.market_analyzer.calculate_ema(df, 50)
+
+            if not pd.isna(ema200.iloc[-1]) and not pd.isna(ema200.iloc[-10]):
+                # Pendiente de EMA200 en los últimos 10 periodos (normalizada por precio)
+                ema200_slope = (ema200.iloc[-1] - ema200.iloc[-10]) / ema200.iloc[-10] * 100
+                # Si la pendiente supera 0.15% en 10 velas H1 = tendencia fuerte
+                SLOPE_THRESHOLD = 0.15
+                if abs(ema200_slope) > SLOPE_THRESHOLD:
+                    logger.info(
+                        f"BB {symbol}: señal bloqueada por tendencia fuerte "
+                        f"(pendiente EMA200: {ema200_slope:.3f}% — umbral: ±{SLOPE_THRESHOLD}%)"
+                    )
+                    return None
+
+            # Filtro adicional: EMA50 debe estar entre las bandas (mercado lateral)
+            # Si EMA50 está fuera de las bandas, el mercado está en tendencia extrema
+            current_ema50 = ema50.iloc[-1]
+            if not pd.isna(current_ema50):
+                if current_ema50 > bb_upper.iloc[-1] or current_ema50 < bb_lower.iloc[-1]:
+                    logger.info(
+                        f"BB {symbol}: señal bloqueada — EMA50 fuera de bandas "
+                        f"(mercado en tendencia extrema)"
+                    )
+                    return None
+
             current = df.iloc[-1]
             previous = df.iloc[-2]
 

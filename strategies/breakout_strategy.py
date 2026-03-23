@@ -77,42 +77,64 @@ class BreakoutStrategy(StrategyBase):
             df['atr'] = self.market_analyzer.calculate_atr(df, self.atr_period)
             df['atr_avg'] = df['atr'].rolling(self.atr_period * 2).mean()
 
-            current = df.iloc[-1]
+            # EMA200 para filtro de tendencia — solo operar a favor de la tendencia
+            ema200 = self.market_analyzer.calculate_ema(df, 200)
+            df['ema200'] = ema200
+
+            current  = df.iloc[-1]
+            previous = df.iloc[-2]
 
             if (pd.isna(current['donchian_high']) or
                     pd.isna(current['atr']) or
-                    pd.isna(current['atr_avg'])):
+                    pd.isna(current['atr_avg']) or
+                    pd.isna(current['ema200'])):
                 return None
 
-            # Confirmar que el ATR actual es mayor que el promedio (movimiento fuerte)
+            # Filtro 1: ATR actual debe superar el promedio (movimiento real, no ruido)
             atr_confirmed = current['atr'] > (current['atr_avg'] * self.atr_multiplier)
+            if not atr_confirmed:
+                return None
 
-            # Señal de COMPRA: precio rompe el máximo del canal
-            if (current['close'] > current['donchian_high'] and atr_confirmed):
+            # Filtro 2: el breakout debe ser de la vela ANTERIOR, no de la actual.
+            # Evita entrar en mitad de una vela que puede revertir.
+            # La vela anterior debe haber cerrado fuera del canal.
+            prev_broke_high = previous['close'] > previous['donchian_high']
+            prev_broke_low  = previous['close'] < previous['donchian_low']
 
+            # Filtro 3: la vela actual debe confirmar — seguir en la direccion del breakout
+            current_confirms_buy  = current['close'] > current['donchian_high']
+            current_confirms_sell = current['close'] < current['donchian_low']
+
+            # Filtro 4: solo operar a favor de la tendencia EMA200
+            price_above_ema = current['close'] > current['ema200']
+            price_below_ema = current['close'] < current['ema200']
+
+            # Señal de COMPRA: breakout confirmado + tendencia alcista
+            if prev_broke_high and current_confirms_buy and price_above_ema:
                 logger.info(
-                    f"BREAKOUT BUY en {symbol} - "
-                    f"Precio: {current['close']:.5f} > Canal: {current['donchian_high']:.5f}"
+                    f"BREAKOUT BUY confirmado en {symbol} - "
+                    f"Precio: {current['close']:.5f} > Canal: {current['donchian_high']:.5f} "
+                    f"| EMA200: {current['ema200']:.5f}"
                 )
                 return {
                     'direction': 'BUY',
-                    'reason': f'Ruptura alcista del canal ({current["donchian_high"]:.5f})',
+                    'reason': f'Ruptura alcista confirmada del canal ({current["donchian_high"]:.5f})',
                     'donchian_high': current['donchian_high'],
-                    'donchian_low': current['donchian_low'],
-                    'atr': current['atr'],
+                    'donchian_low':  current['donchian_low'],
+                    'atr':     current['atr'],
                     'atr_avg': current['atr_avg']
                 }
 
-            # Señal de VENTA: precio rompe el mínimo del canal
-            elif (current['close'] < current['donchian_low'] and atr_confirmed):
-
+            # Señal de VENTA: breakout confirmado + tendencia bajista
+            elif prev_broke_low and current_confirms_sell and price_below_ema:
                 logger.info(
-                    f"BREAKOUT SELL en {symbol} - "
-                    f"Precio: {current['close']:.5f} < Canal: {current['donchian_low']:.5f}"
+                    f"BREAKOUT SELL confirmado en {symbol} - "
+                    f"Precio: {current['close']:.5f} < Canal: {current['donchian_low']:.5f} "
+                    f"| EMA200: {current['ema200']:.5f}"
                 )
                 return {
                     'direction': 'SELL',
-                    'reason': f'Ruptura bajista del canal ({current["donchian_low"]:.5f})',
+                    'reason': f'Ruptura bajista confirmada del canal ({current["donchian_low"]:.5f})',
                     'donchian_high': current['donchian_high'],
                     'donchian_low': current['donchian_low'],
                     'atr': current['atr'],
@@ -136,13 +158,13 @@ class BreakoutStrategy(StrategyBase):
 
         if signal['direction'] == 'BUY':
             entry = market_data.ask
-            # SL debajo del canal (retroceso invalida el breakout)
-            stop_loss = signal['donchian_high'] - (atr * 1.0)
-            # TP amplio para capturar la tendencia (ratio 2:1)
-            take_profit = entry + (atr * 4.0)
+            # SL 2x ATR debajo del canal — da espacio al precio para respirar
+            # 1x ATR era demasiado ajustado, el ruido normal del mercado lo golpeaba
+            stop_loss   = signal['donchian_high'] - (atr * 2.0)
+            take_profit = entry + (atr * 4.0)  # R:R 1:2
         else:
             entry = market_data.bid
-            stop_loss = signal['donchian_low'] + (atr * 1.0)
+            stop_loss   = signal['donchian_low'] + (atr * 2.0)
             take_profit = entry - (atr * 4.0)
 
         entry = symbol_info.normalize_price(entry)
@@ -183,12 +205,25 @@ class BreakoutStrategy(StrategyBase):
         if pd.isna(current['donchian_high']):
             return False
 
-        # Si el precio regresa dentro del canal, el breakout fue falso
-        if position.type == "BUY" and current['close'] < current['donchian_high']:
-            logger.info(f"Cerrando BUY - Breakout falso, precio regresó al canal")
-            return True
-        elif position.type == "SELL" and current['close'] > current['donchian_low']:
-            logger.info(f"Cerrando SELL - Breakout falso, precio regresó al canal")
-            return True
+        atr_s = self.market_analyzer.calculate_atr(df, self.atr_period).iloc[-1]
+
+        # Cierre conservador: el precio debe regresar UN ATR completo dentro del canal
+        # antes de considerar el breakout como falso. Evita cierres prematuros por ruido.
+        if position.type == "BUY":
+            false_breakout_level = current['donchian_high'] - atr_s
+            if current['close'] < false_breakout_level:
+                logger.info(
+                    f"Cerrando BUY {position.ticket} - Breakout falso confirmado "
+                    f"(precio {current['close']:.5f} < nivel {false_breakout_level:.5f})"
+                )
+                return True
+        elif position.type == "SELL":
+            false_breakout_level = current['donchian_low'] + atr_s
+            if current['close'] > false_breakout_level:
+                logger.info(
+                    f"Cerrando SELL {position.ticket} - Breakout falso confirmado "
+                    f"(precio {current['close']:.5f} > nivel {false_breakout_level:.5f})"
+                )
+                return True
 
         return False

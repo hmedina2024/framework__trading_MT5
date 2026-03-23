@@ -28,13 +28,23 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 # Horas sin operar en un simbolo tras cerrar una posicion
-COOLDOWN_HOURS_AFTER_TRADE = 2
+# DEMO: reducido de 2h a 0.5h (30 min)
+COOLDOWN_HOURS_AFTER_TRADE = 0.5
 
 # Maximo de trades por simbolo en el mismo dia calendario
-MAX_DAILY_TRADES_PER_SYMBOL = 3
+# DEMO: aumentado de 3 a 10
+MAX_DAILY_TRADES_PER_SYMBOL = 10
 
 # Segundos minimos que debe vivir una posicion antes de evaluar el cierre
 MIN_POSITION_AGE_SECONDS = 300
+
+# Trailing Stop: multiplicador de ATR para mover el SL
+# Cuando la posicion gana >= TRAILING_ACTIVATION_ATR * ATR, se activa el trailing
+# El SL se mueve a precio_actual - TRAILING_STOP_ATR * ATR (para BUY)
+# En False lo desactiva — cambiar a True para activar en todas las estrategias
+TRAILING_STOP_ENABLED   = True
+TRAILING_ACTIVATION_ATR = 1.0   # activar cuando ganancia >= 1x ATR
+TRAILING_STOP_ATR       = 1.0   # SL se coloca a 1x ATR del precio actual
 
 
 class StrategyBase(ABC):
@@ -85,6 +95,9 @@ class StrategyBase(ABC):
 
         # Contador de trades diarios: {symbol: {fecha_str: count}}
         self._daily_trades: Dict[str, Dict[str, int]] = {}
+
+        # Trailing stop: SL maximo registrado por ticket {ticket: float}
+        self._trailing_sl: Dict[int, float] = {}
 
         logger.info(f"Estrategia '{name}' inicializada para {symbols}")
 
@@ -335,6 +348,63 @@ class StrategyBase(ABC):
         positions = self.connector.get_positions(symbol)
         return any(p.magic_number == self.magic_number for p in positions)
 
+    def _update_trailing_stop(self, position) -> None:
+        """
+        Mueve el Stop Loss hacia la ganancia cuando el precio avanza a favor.
+        Se activa cuando la ganancia supera TRAILING_ACTIVATION_ATR * ATR.
+        El nuevo SL siempre es mejor que el anterior — nunca retrocede.
+        """
+        if not TRAILING_STOP_ENABLED:
+            return
+
+        try:
+            df = self.market_analyzer.get_candles(position.symbol, self.timeframe, count=20)
+            if df is None or df.empty:
+                return
+
+            atr = self.market_analyzer.calculate_atr(df).iloc[-1]
+            if not atr or atr <= 0:
+                return
+
+            symbol_info = self.connector.get_symbol_info(position.symbol)
+            if not symbol_info:
+                return
+
+            market_data = self.connector.get_market_data(position.symbol)
+            if not market_data:
+                return
+
+            current_price = market_data.bid if position.type == "BUY" else market_data.ask
+            activation_distance = TRAILING_ACTIVATION_ATR * atr
+            trailing_distance   = TRAILING_STOP_ATR * atr
+
+            if position.type == "BUY":
+                profit_distance = current_price - position.price_open
+                if profit_distance < activation_distance:
+                    return  # ganancia insuficiente para activar trailing
+                new_sl = symbol_info.normalize_price(current_price - trailing_distance)
+                current_sl = position.stop_loss or 0
+                if new_sl <= current_sl:
+                    return  # el nuevo SL no mejora al actual
+            else:
+                profit_distance = position.price_open - current_price
+                if profit_distance < activation_distance:
+                    return
+                new_sl = symbol_info.normalize_price(current_price + trailing_distance)
+                current_sl = position.stop_loss or float('inf')
+                if new_sl >= current_sl:
+                    return
+
+            result = self.order_manager.modify_position(position.ticket, stop_loss=new_sl)
+            if result.success:
+                logger.info(
+                    f"Trailing Stop actualizado | {position.symbol} {position.type} "
+                    f"Ticket:{position.ticket} | SL: {current_sl:.5f} -> {new_sl:.5f} "
+                    f"| Precio: {current_price:.5f} | ATR: {atr:.5f}"
+                )
+        except Exception as e:
+            logger.error(f"Error en trailing stop para ticket {position.ticket}: {e}")
+
     def _check_open_positions(self, symbol: str) -> None:
         """Verifica y gestiona posiciones abiertas."""
         positions = self.connector.get_positions(symbol)
@@ -346,6 +416,9 @@ class StrategyBase(ABC):
             # Guard edad minima — evita cerrar en la misma iteracion que se abrio
             if not self._is_position_old_enough(position.ticket):
                 continue
+
+            # Trailing stop — mover SL a favor si hay suficiente ganancia
+            self._update_trailing_stop(position)
 
             if self.check_exit_conditions(position):
                 logger.info(

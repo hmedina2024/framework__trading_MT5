@@ -17,11 +17,12 @@ class RiskManager:
         self.connector = connector
         self.max_risk_per_trade = settings.MAX_RISK_PER_TRADE
         self.max_daily_loss = max_daily_loss or settings.MAX_DAILY_LOSS
-        self.max_open_positions = max_open_positions or settings.MAX_OPEN_POSITIONS
+        # DEMO: maximo de posiciones aumentado a 30 para evaluar multiples estrategias
+        self.max_open_positions = max_open_positions or 30
         account_info = self.connector.get_account_info()
         self.balance_at_start = account_info.balance if account_info else None
         self._daily_loss_alerted = False
-        logger.info(f"RiskManager inicializado - Pérdida diaria máx: {self.max_daily_loss*100}%, Posiciones máx: {self.max_open_positions}, Balance inicial: {self.balance_at_start}")
+        logger.info(f"RiskManager inicializado - Perdida diaria max: {self.max_daily_loss*100}%, Posiciones max: {self.max_open_positions}, Balance inicial: {self.balance_at_start}")
         self._start_daily_reset_scheduler()
 
     def validate_trade(self, request: TradeRequest) -> tuple[bool, str]:
@@ -68,6 +69,17 @@ class RiskManager:
         return True
 
     def _check_daily_loss(self, account_info: AccountInfo) -> tuple[bool, str]:
+        # DEMO MODE: limite de perdida diaria desactivado para evaluacion de estrategias.
+        # Cambiar a False para reactivar en produccion.
+        DEMO_MODE = True
+        if DEMO_MODE:
+            if self.balance_at_start and self.balance_at_start > 0:
+                current_balance = account_info.balance
+                daily_loss = self.balance_at_start - current_balance
+                daily_loss_pct = daily_loss / self.balance_at_start
+                logger.debug(f"[DEMO] Perdida diaria actual: {daily_loss_pct*100:.2f}% — sin bloqueo")
+            return True, ""
+        # --- Logica de produccion (activa cuando DEMO_MODE = False) ---
         if not self.balance_at_start or self.balance_at_start <= 0:
             return True, ""
         current_balance = account_info.balance
@@ -76,18 +88,18 @@ class RiskManager:
         if daily_loss_pct >= self.max_daily_loss:
             if not self._daily_loss_alerted:
                 logger.warning(
-                    f"🚨 LÍMITE DE PÉRDIDA DIARIA ALCANZADO: "
-                    f"Pérdida: ${daily_loss:.2f} ({daily_loss_pct*100:.2f}%) | "
-                    f"Límite: {self.max_daily_loss*100:.0f}% | "
+                    f"LIMITE DE PERDIDA DIARIA ALCANZADO: "
+                    f"Perdida: ${daily_loss:.2f} ({daily_loss_pct*100:.2f}%) | "
+                    f"Limite: {self.max_daily_loss*100:.0f}% | "
                     f"Balance inicial: ${self.balance_at_start:.2f} | "
                     f"Actual: ${current_balance:.2f} | "
                     f"Bots bloqueados hasta medianoche."
                 )
                 self._daily_loss_alerted = True
-            return False, f"Límite de pérdida diaria alcanzado: {daily_loss_pct*100:.2f}% (máx {self.max_daily_loss*100:.0f}%)"
+            return False, f"Limite de perdida diaria alcanzado: {daily_loss_pct*100:.2f}% (max {self.max_daily_loss*100:.0f}%)"
         if daily_loss_pct > self.max_daily_loss * 0.7:
             remaining = (self.max_daily_loss - daily_loss_pct) * self.balance_at_start
-            logger.warning(f"⚠️ Pérdida diaria al {daily_loss_pct*100:.2f}% — Quedan ${remaining:.2f} antes del bloqueo")
+            logger.warning(f"Perdida diaria al {daily_loss_pct*100:.2f}% — Quedan ${remaining:.2f} antes del bloqueo")
         self._daily_loss_alerted = False
         return True, ""
 

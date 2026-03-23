@@ -105,6 +105,7 @@ class MarketData(BaseModel):
     volume: float = Field(..., description="Volumen")
     time: datetime = Field(..., description="Timestamp")
     spread: float = Field(..., description="Spread en puntos")
+    daily_change: float = Field(0.0, description="Cambio porcentual diario (Daily Change de MT5)")
     
     @property
     def mid_price(self) -> float:
