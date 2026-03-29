@@ -151,13 +151,16 @@ class MovingAverageCrossStrategy(StrategyBase):
         df['atr'] = self.market_analyzer.calculate_atr(df)
         atr = df['atr'].iloc[-1]
         
+        # Ajuste dinámico de SL según volatilidad del día
+        vol_mult = self._get_volatility_sl_multiplier(symbol)
+
         if signal['direction'] == 'BUY':
-            entry = market_data.ask
-            stop_loss = entry - (atr * 2)  # SL a 2 ATR
-            take_profit = entry + (atr * 3)  # TP a 3 ATR (ratio 1.5:1)
-        else:  # SELL
-            entry = market_data.bid
-            stop_loss = entry + (atr * 2)
+            entry       = market_data.ask
+            stop_loss   = entry - (atr * 2 * vol_mult)
+            take_profit = entry + (atr * 3)
+        else:
+            entry       = market_data.bid
+            stop_loss   = entry + (atr * 2 * vol_mult)
             take_profit = entry - (atr * 3)
         
         # Normalizar precios

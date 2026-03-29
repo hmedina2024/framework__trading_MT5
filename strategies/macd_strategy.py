@@ -182,13 +182,16 @@ class MACDStrategy(StrategyBase):
         df['atr'] = self.market_analyzer.calculate_atr(df)
         atr = df['atr'].iloc[-1]
 
+        # Ajuste dinámico de SL según volatilidad del día
+        vol_mult = self._get_volatility_sl_multiplier(symbol)
+
         if signal['direction'] == 'BUY':
             entry = market_data.ask
-            stop_loss = entry - (atr * 2.0)
+            stop_loss   = entry - (atr * 2.0 * vol_mult)
             take_profit = entry + (atr * 3.0)
         else:
             entry = market_data.bid
-            stop_loss = entry + (atr * 2.0)
+            stop_loss   = entry + (atr * 2.0 * vol_mult)
             take_profit = entry - (atr * 3.0)
 
         entry = symbol_info.normalize_price(entry)

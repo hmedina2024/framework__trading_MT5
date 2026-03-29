@@ -30,6 +30,13 @@ async def lifespan(app: FastAPI):
     success = await trading_service.initialize()
     if success:
         logger.info("✅ Servicio de trading inicializado correctamente")
+        # Auto-arranque: relanzar bots que estaban activos antes del reinicio
+        loop = asyncio.get_event_loop()
+        launched = await loop.run_in_executor(None, trading_service._load_bots_config)
+        if launched > 0:
+            logger.info(f"🤖 Auto-arranque: {launched} bots relanzados automáticamente")
+        else:
+            logger.info("🤖 Auto-arranque: sin bots previos configurados")
     else:
         logger.warning("⚠️ Servicio de trading no pudo conectar a MT5 al inicio")
     

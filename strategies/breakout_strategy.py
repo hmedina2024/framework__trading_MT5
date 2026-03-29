@@ -156,15 +156,16 @@ class BreakoutStrategy(StrategyBase):
 
         atr = signal['atr']
 
+        # Ajuste dinámico de SL según volatilidad del día
+        vol_mult = self._get_volatility_sl_multiplier(symbol)
+
         if signal['direction'] == 'BUY':
             entry = market_data.ask
-            # SL 2x ATR debajo del canal — da espacio al precio para respirar
-            # 1x ATR era demasiado ajustado, el ruido normal del mercado lo golpeaba
-            stop_loss   = signal['donchian_high'] - (atr * 2.0)
-            take_profit = entry + (atr * 4.0)  # R:R 1:2
+            stop_loss   = signal['donchian_high'] - (atr * 2.0 * vol_mult)
+            take_profit = entry + (atr * 4.0)
         else:
             entry = market_data.bid
-            stop_loss   = signal['donchian_low'] + (atr * 2.0)
+            stop_loss   = signal['donchian_low'] + (atr * 2.0 * vol_mult)
             take_profit = entry - (atr * 4.0)
 
         entry = symbol_info.normalize_price(entry)

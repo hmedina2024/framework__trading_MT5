@@ -22,7 +22,13 @@ class RiskManager:
         account_info = self.connector.get_account_info()
         self.balance_at_start = account_info.balance if account_info else None
         self._daily_loss_alerted = False
-        logger.info(f"RiskManager inicializado - Perdida diaria max: {self.max_daily_loss*100}%, Posiciones max: {self.max_open_positions}, Balance inicial: {self.balance_at_start}")
+        logger.info(
+            f"RiskManager inicializado | "
+            f"Riesgo por trade: {self.max_risk_per_trade*100}% | "
+            f"Posiciones max: {self.max_open_positions} | "
+            f"Limite por activo: 1 posicion global | "
+            f"Balance inicial: ${self.balance_at_start:.2f}"
+        )
         self._start_daily_reset_scheduler()
 
     def validate_trade(self, request: TradeRequest) -> tuple[bool, str]:
@@ -32,6 +38,10 @@ class RiskManager:
         allowed, reason = self.is_trading_allowed()
         if not allowed:
             return False, reason
+        # Limite global: 1 posicion por activo entre todos los bots
+        if not self._check_max_positions_per_symbol(request.symbol):
+            return False, f"Ya existe una posicion abierta en {request.symbol} (limite global por activo)"
+
         if not self._check_margin_available(account_info, request):
             return False, "Margen insuficiente para la operación"
         logger.info(f"✅ Validación de riesgo aprobada para {request.symbol}")
@@ -48,6 +58,27 @@ class RiskManager:
         except Exception as e:
             logger.error(f"Error al verificar posiciones abiertas: {e}")
             return False
+
+    def _check_max_positions_per_symbol(self, symbol: str) -> bool:
+        """
+        Verifica que no haya ya una posicion abierta en el simbolo,
+        independientemente del magic number o estrategia.
+        Evita que multiples bots abran posiciones en el mismo activo
+        simultaneamente, lo que consume margen y duplica el riesgo.
+        """
+        try:
+            positions = self.connector.get_positions(symbol)
+            if positions and len(positions) > 0:
+                logger.warning(
+                    f"Posicion global bloqueada para {symbol}: "
+                    f"ya hay {len(positions)} posicion(es) abiertas en ese activo "
+                    f"(independiente del bot que las abrio)"
+                )
+                return False
+            return True
+        except Exception as e:
+            logger.error(f"Error al verificar posiciones por simbolo: {e}")
+            return True  # en caso de error, permitir — mejor falso positivo que bloqueo
 
     def _check_margin_available(self, account_info: AccountInfo, request: TradeRequest) -> bool:
         symbol_info = self.connector.get_symbol_info(request.symbol)

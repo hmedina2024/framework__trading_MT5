@@ -1,0 +1,74 @@
+[
+  {
+    "strategy_type": "BOLLINGER",
+    "symbol": "EURUSD"
+  },
+  {
+    "strategy_type": "MACD",
+    "symbol": "EURUSD"
+  },
+  {
+    "strategy_type": "BOLLINGER",
+    "symbol": "GBPUSD"
+  },
+  {
+    "strategy_type": "BREAKOUT",
+    "symbol": "GBPUSD"
+  },
+  {
+    "strategy_type": "SUPERTREND",
+    "symbol": "USDJPY"
+  },
+  {
+    "strategy_type": "SUPERTREND",
+    "symbol": "XAUUSD"
+  },
+  {
+    "strategy_type": "MACD",
+    "symbol": "XAUUSD"
+  },
+  {
+    "strategy_type": "BREAKOUT",
+    "symbol": "XAUUSD"
+  },
+  {
+    "strategy_type": "BOLLINGER",
+    "symbol": "AUDUSD"
+  },
+  {
+    "strategy_type": "SUPERTREND",
+    "symbol": "USDCAD"
+  },
+  {
+    "strategy_type": "BREAKOUT",
+    "symbol": "US30"
+  },
+  {
+    "strategy_type": "EMA_CROSS",
+    "symbol": "EURUSD"
+  },
+  {
+    "strategy_type": "EMA_CROSS",
+    "symbol": "GBPUSD"
+  },
+  {
+    "strategy_type": "EMA_CROSS",
+    "symbol": "USDJPY"
+  },
+  {
+    "strategy_type": "WILLIAMS_R",
+    "symbol": "AUDUSD"
+  },
+  {
+    "strategy_type": "WILLIAMS_R",
+    "symbol": "USDCAD"
+  },
+  {
+    "strategy_type": "EMA_CROSS",
+    "symbol": "USDCAD"
+  },
+  {
+    "strategy_type": "BREAKOUT",
+    "symbol": "BTCUSD"
+  }
+]

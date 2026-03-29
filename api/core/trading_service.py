@@ -18,11 +18,17 @@ from strategies.williams_r_strategy import WilliamsRStrategy
 from models import TradeRequest, TradeResult, OrderType
 from utils import get_logger
 import asyncio
+import json
+from pathlib import Path
 from typing import Dict, List, Optional
 import MetaTrader5 as mt5
-import random
 
 logger = get_logger(__name__)
+
+# Archivo donde se persiste la lista de bots activos
+# Se actualiza cada vez que se inicia o detiene un bot
+BOTS_CONFIG_FILE = Path("bots_config.json")
+
 
 class TradingService:
     """
@@ -169,6 +175,83 @@ class TradingService:
         },
     }
 
+    def _save_bots_config(self) -> None:
+        """
+        Guarda la lista de bots activos en bots_config.json.
+        Se llama cada vez que se inicia o detiene un bot.
+        Al reiniciar el servidor, _load_bots_config relanza todos los bots del archivo.
+        """
+        try:
+            config = []
+            for strategy_id, strategy in self.active_strategies.items():
+                # strategy_id tiene formato "TIPO_SIMBOLO"
+                # El tipo puede tener _ propio: EMA_CROSS, WILLIAMS_R, MA_CROSS
+                # Solución: iterar el catálogo y ver cuál es prefijo del strategy_id
+                strategy_type = None
+                symbol = None
+                for catalog_type in self.STRATEGY_CATALOG.keys():
+                    prefix = f"{catalog_type}_"
+                    if strategy_id.startswith(prefix):
+                        strategy_type = catalog_type
+                        symbol = strategy_id[len(prefix):]
+                        break
+                if strategy_type and symbol:
+                    config.append({
+                        'strategy_type': strategy_type,
+                        'symbol': symbol
+                    })
+
+            BOTS_CONFIG_FILE.write_text(
+                json.dumps(config, indent=2, ensure_ascii=False),
+                encoding='utf-8'
+            )
+            logger.info(f"Configuracion de bots guardada: {len(config)} bots en {BOTS_CONFIG_FILE}")
+        except Exception as e:
+            logger.error(f"Error guardando configuracion de bots: {e}")
+
+    def _load_bots_config(self) -> int:
+        """
+        Carga y relanza los bots desde bots_config.json al iniciar el servidor.
+        Retorna el numero de bots relanzados exitosamente.
+        Si el archivo no existe o está vacío, no hace nada.
+        """
+        if not BOTS_CONFIG_FILE.exists():
+            logger.info("No hay configuracion de bots guardada — servidor inicia sin bots activos")
+            return 0
+
+        try:
+            raw = BOTS_CONFIG_FILE.read_text(encoding='utf-8').strip()
+            if not raw:
+                return 0
+
+            config = json.loads(raw)
+            if not config:
+                return 0
+
+            logger.info(f"Cargando {len(config)} bots desde {BOTS_CONFIG_FILE}...")
+            launched = 0
+            for entry in config:
+                strategy_type = entry.get('strategy_type')
+                symbol        = entry.get('symbol')
+                if not strategy_type or not symbol:
+                    continue
+                success = self.start_strategy(symbol, strategy_type)
+                if success:
+                    launched += 1
+                    logger.info(f"  Auto-arrancado: {strategy_type} en {symbol}")
+                else:
+                    logger.warning(f"  No se pudo auto-arrancar: {strategy_type} en {symbol}")
+
+            logger.info(f"Auto-arranque completado: {launched}/{len(config)} bots activos")
+            return launched
+
+        except json.JSONDecodeError as e:
+            logger.error(f"bots_config.json corrupto: {e} — ignorando auto-arranque")
+            return 0
+        except Exception as e:
+            logger.error(f"Error cargando configuracion de bots: {e}")
+            return 0
+
     def get_strategy_catalog(self) -> list:
         """Retorna el catálogo de estrategias disponibles"""
         return [
@@ -258,6 +341,7 @@ class TradingService:
             strategy.start()
             self.active_strategies[strategy_id] = strategy
             logger.info(f"Estrategia {strategy_id} iniciada")
+            self._save_bots_config()
             return True
 
         except Exception as e:
@@ -268,6 +352,7 @@ class TradingService:
         if strategy_id in self.active_strategies:
             self.active_strategies[strategy_id].stop()
             del self.active_strategies[strategy_id]
+            self._save_bots_config()
             return True
         return False
         

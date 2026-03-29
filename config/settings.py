@@ -31,7 +31,7 @@ class Settings:
     MAX_SLIPPAGE: int = int(os.getenv("MAX_SLIPPAGE", "10"))
     
     # Configuración de gestión de riesgo
-    MAX_RISK_PER_TRADE: float = float(os.getenv("MAX_RISK_PER_TRADE", "0.02"))  # 2%
+    MAX_RISK_PER_TRADE: float = float(os.getenv("MAX_RISK_PER_TRADE", "0.01"))  # 1% — reducido de 2% para proteger capital en demo
     MAX_DAILY_LOSS: float = float(os.getenv("MAX_DAILY_LOSS", "0.05"))  # 5%
     MAX_OPEN_POSITIONS: int = int(os.getenv("MAX_OPEN_POSITIONS", "5"))
     

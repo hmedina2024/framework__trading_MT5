@@ -137,13 +137,16 @@ class WilliamsRStrategy(StrategyBase):
         atr = df['atr'].iloc[-1]
 
         # SL: 1.5 ATR | TP: 2.5 ATR → R:R 1:1.67
+        # Ajuste dinámico de SL según volatilidad del día
+        vol_mult = self._get_volatility_sl_multiplier(symbol)
+
         if signal['direction'] == 'BUY':
             entry       = market_data.ask
-            stop_loss   = entry - (atr * 1.5)
+            stop_loss   = entry - (atr * 1.5 * vol_mult)
             take_profit = entry + (atr * 2.5)
         else:
             entry       = market_data.bid
-            stop_loss   = entry + (atr * 1.5)
+            stop_loss   = entry + (atr * 1.5 * vol_mult)
             take_profit = entry - (atr * 2.5)
 
         entry       = symbol_info.normalize_price(entry)

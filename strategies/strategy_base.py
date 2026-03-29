@@ -13,6 +13,8 @@ Mejoras aplicadas vs version anterior:
 """
 import threading
 import time
+import json
+import urllib.request
 from abc import ABC, abstractmethod
 from typing import Optional, Dict, List
 from datetime import datetime, timedelta, timezone
@@ -45,6 +47,57 @@ MIN_POSITION_AGE_SECONDS = 300
 TRAILING_STOP_ENABLED   = True
 TRAILING_ACTIVATION_ATR = 1.0   # activar cuando ganancia >= 1x ATR
 TRAILING_STOP_ATR       = 1.0   # SL se coloca a 1x ATR del precio actual
+
+# ---------------------------------------------------------------------------
+# Filtro de sesion de trading
+# Solo opera durante las sesiones de mayor liquidez (hora del servidor UTC+2)
+# Sesion Londres:    07:00 - 16:00 UTC  = 09:00 - 18:00 UTC+2
+# Sesion NY:         13:00 - 20:00 UTC  = 15:00 - 22:00 UTC+2
+# Overlap Londres+NY (mayor volumen): 13:00 - 16:00 UTC = 15:00 - 18:00 UTC+2
+# Fuera de sesion: Asia (00:00-07:00 UTC) — alta tasa de señales falsas
+# ---------------------------------------------------------------------------
+TRADING_SESSION_FILTER  = True   # False = operar 24h (modo sin restriccion)
+SESSION_START_UTC       = 7      # hora UTC de inicio (apertura Londres)
+SESSION_END_UTC         = 20     # hora UTC de cierre (cierre NY)
+
+# ---------------------------------------------------------------------------
+# Filtro de correlación entre pares
+# Pares con correlación histórica alta (>0.70) comparten el mismo movimiento
+# del dólar. Si ya hay posición abierta en uno, no abrir en el correlacionado.
+# Grupos: si hay BUY en EURUSD, bloquea BUY en AUDUSD/GBPUSD (misma dirección USD)
+#         si hay SELL en EURUSD, bloquea SELL en AUDUSD/GBPUSD
+# ---------------------------------------------------------------------------
+CORRELATION_FILTER = True
+
+# Grupos de pares correlacionados (todos se mueven similar vs el USD)
+CORRELATED_GROUPS = [
+    {'EURUSD', 'GBPUSD', 'AUDUSD', 'NZDUSD'},   # largo USD inverso
+    {'USDJPY', 'USDCAD', 'USDCHF'},              # largo USD directo
+]
+
+# ---------------------------------------------------------------------------
+# Filtro de noticias de alto impacto
+# Bloquea nuevas entradas N minutos antes y después de eventos macro clave.
+# Fuente: ForexFactory calendar API (gratuita, sin autenticación).
+# ---------------------------------------------------------------------------
+NEWS_FILTER_ENABLED = True
+NEWS_MINUTES_BEFORE = 30   # bloquear 30 min antes del evento
+NEWS_MINUTES_AFTER  = 30   # bloquear 30 min después del evento
+NEWS_CALENDAR_URL   = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+NEWS_CACHE_MINUTES  = 60   # refrescar calendario cada hora
+
+# ---------------------------------------------------------------------------
+# Ajuste dinámico de SL según volatilidad del día
+# Si el ATR actual supera ATR_HIGH_VOL_THRESHOLD veces el ATR promedio de 20 días,
+# se amplía el multiplicador de SL para evitar ser barrido por ruido.
+# Ejemplo: día de NFP el ATR puede ser 2-3x el promedio — sin ajuste el SL
+# se golpea en minutos aunque la dirección sea correcta.
+# ---------------------------------------------------------------------------
+ATR_VOLATILITY_ENABLED       = True
+ATR_HIGH_VOL_THRESHOLD       = 1.5   # ATR actual > 1.5x promedio = alta volatilidad
+ATR_HIGH_VOL_SL_MULTIPLIER   = 1.5   # ampliar SL x1.5 en días de alta volatilidad
+ATR_LOW_VOL_THRESHOLD        = 0.7   # ATR actual < 0.7x promedio = baja volatilidad
+ATR_LOW_VOL_SL_MULTIPLIER    = 0.85  # reducir SL x0.85 en días tranquilos
 
 
 class StrategyBase(ABC):
@@ -98,6 +151,10 @@ class StrategyBase(ABC):
 
         # Trailing stop: SL maximo registrado por ticket {ticket: float}
         self._trailing_sl: Dict[int, float] = {}
+
+        # Cache de noticias para no hacer requests en cada iteracion
+        self._news_cache: List[Dict] = []
+        self._news_cache_time: Optional[datetime] = None
 
         logger.info(f"Estrategia '{name}' inicializada para {symbols}")
 
@@ -166,6 +223,210 @@ class StrategyBase(ABC):
             return True
         return False
 
+    def _is_trading_session(self) -> bool:
+        """
+        Verifica si el mercado esta en horario de sesion activa.
+        Basado en UTC para ser independiente de la zona horaria del servidor.
+        Solo permite operar entre SESSION_START_UTC y SESSION_END_UTC.
+        Fuera de ese rango (sesion asiatica principalmente) bloquea nuevas entradas.
+        Las posiciones ya abiertas NO se cierran — solo se bloquean nuevas entradas.
+        """
+        if not TRADING_SESSION_FILTER:
+            return True
+
+        from datetime import timezone
+        now_utc = datetime.now(timezone.utc)
+        current_hour = now_utc.hour
+
+        in_session = SESSION_START_UTC <= current_hour < SESSION_END_UTC
+
+        if not in_session:
+            logger.debug(
+                f"Fuera de sesion de trading: {current_hour:02d}:00 UTC "
+                f"(sesion activa: {SESSION_START_UTC:02d}:00 - {SESSION_END_UTC:02d}:00 UTC)"
+            )
+        return in_session
+
+    def _is_correlated_blocked(self, symbol: str, direction: str) -> bool:
+        """
+        Verifica si ya hay una posicion abierta en un par correlacionado
+        con la misma direccion USD. Si es asi, bloquea la nueva entrada
+        para evitar doble exposicion al mismo movimiento del dolar.
+
+        Ejemplo: si EURUSD tiene un BUY abierto (apuesta a que USD baja)
+        y llega señal BUY en AUDUSD (tambien apuesta a que USD baja),
+        se bloquea porque es el mismo riesgo duplicado.
+        """
+        if not CORRELATION_FILTER:
+            return False
+
+        try:
+            # Encontrar el grupo de correlacion al que pertenece el simbolo
+            my_group = None
+            for group in CORRELATED_GROUPS:
+                if symbol in group:
+                    my_group = group
+                    break
+
+            if not my_group:
+                return False  # simbolo sin grupo — no aplicar filtro
+
+            # Determinar si la direccion es "largo USD" o "corto USD"
+            # Para pares XXX/USD: BUY = corto USD, SELL = largo USD
+            # Para pares USD/XXX: BUY = largo USD, SELL = corto USD
+            usd_is_second = symbol.endswith('USD')  # EURUSD, GBPUSD, AUDUSD
+            if usd_is_second:
+                usd_direction = 'SHORT' if direction == 'BUY' else 'LONG'
+            else:
+                usd_direction = 'LONG' if direction == 'BUY' else 'SHORT'
+
+            # Revisar posiciones abiertas en pares del mismo grupo
+            for correlated_symbol in my_group:
+                if correlated_symbol == symbol:
+                    continue
+
+                positions = self.connector.get_positions(correlated_symbol)
+                for pos in positions:
+                    # Calcular direccion USD de la posicion existente
+                    pos_usd_is_second = correlated_symbol.endswith('USD')
+                    if pos_usd_is_second:
+                        pos_usd_dir = 'SHORT' if pos.type == 'BUY' else 'LONG'
+                    else:
+                        pos_usd_dir = 'LONG' if pos.type == 'BUY' else 'SHORT'
+
+                    if pos_usd_dir == usd_direction:
+                        logger.info(
+                            f"Correlacion bloqueada: {symbol} {direction} "
+                            f"— ya hay {correlated_symbol} {pos.type} "
+                            f"(misma exposicion USD: {usd_direction})"
+                        )
+                        return True
+
+            return False
+
+        except Exception as e:
+            logger.error(f"Error en filtro de correlacion: {e}")
+            return False  # en caso de error, no bloquear
+
+    def _fetch_news_calendar(self) -> List[Dict]:
+        """
+        Descarga el calendario de ForexFactory y filtra eventos de alto impacto.
+        Usa cache en memoria — solo hace request cada NEWS_CACHE_MINUTES minutos.
+        """
+        now = datetime.now(timezone.utc)
+        if (self._news_cache_time and
+                (now - self._news_cache_time).total_seconds() < NEWS_CACHE_MINUTES * 60):
+            return self._news_cache
+        try:
+            req = urllib.request.Request(
+                NEWS_CALENDAR_URL,
+                headers={'User-Agent': 'MT5TradingBot/1.0'}
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                raw = json.loads(resp.read().decode('utf-8'))
+            high_impact = [
+                {'title': e.get('title',''), 'country': e.get('country',''),
+                 'date': e.get('date',''), 'time': e.get('time','')}
+                for e in raw if e.get('impact','').lower() == 'high'
+            ]
+            self._news_cache      = high_impact
+            self._news_cache_time = now
+            logger.debug(f"Calendario actualizado: {len(high_impact)} eventos alto impacto")
+            return high_impact
+        except Exception as e:
+            logger.warning(f"No se pudo obtener calendario de noticias: {e}")
+            return self._news_cache
+
+    def _is_news_blackout(self) -> bool:
+        """
+        Retorna True si estamos dentro de la ventana de blackout de una noticia
+        de alto impacto (NEWS_MINUTES_BEFORE antes o NEWS_MINUTES_AFTER despues).
+        En caso de error de red, permite la operacion (no bloquea).
+        """
+        if not NEWS_FILTER_ENABLED:
+            return False
+        try:
+            events = self._fetch_news_calendar()
+            if not events:
+                return False
+            now_utc = datetime.now(timezone.utc)
+            for event in events:
+                date_str = event.get('date', '')
+                time_str = event.get('time', '')
+                if not date_str or not time_str:
+                    continue
+                try:
+                    event_dt = datetime.strptime(
+                        f"{date_str} {time_str}", "%m-%d-%Y %I:%M%p"
+                    ).replace(tzinfo=timezone.utc)
+                except ValueError:
+                    continue
+                diff_min = (now_utc - event_dt).total_seconds() / 60
+                if -NEWS_MINUTES_BEFORE <= diff_min <= NEWS_MINUTES_AFTER:
+                    logger.info(
+                        f"BLACKOUT noticia: '{event['title']}' ({event['country']}) "
+                        f"{'en' if diff_min < 0 else 'hace'} {abs(int(diff_min))} min"
+                    )
+                    return True
+            return False
+        except Exception as e:
+            logger.error(f"Error en filtro de noticias: {e}")
+            return False
+
+    def _get_volatility_sl_multiplier(self, symbol: str) -> float:
+        """
+        Calcula un multiplicador de SL basado en la volatilidad actual vs promedio.
+        Retorna un factor que las estrategias aplican sobre su SL base:
+          - Día normal:          retorna 1.0  (sin cambio)
+          - Alta volatilidad:    retorna ATR_HIGH_VOL_SL_MULTIPLIER (ej: 1.5)
+          - Baja volatilidad:    retorna ATR_LOW_VOL_SL_MULTIPLIER  (ej: 0.85)
+
+        Uso en calculate_entry_exit de cada estrategia:
+            vol_mult = self._get_volatility_sl_multiplier(symbol)
+            stop_loss = entry - (atr * 2.0 * vol_mult)
+        """
+        if not ATR_VOLATILITY_ENABLED:
+            return 1.0
+
+        try:
+            # Obtener velas D1 para calcular ATR diario promedio (20 días)
+            import MetaTrader5 as mt5
+            df_daily = self.market_analyzer.get_candles(symbol, mt5.TIMEFRAME_D1, count=21)
+            if df_daily is None or len(df_daily) < 5:
+                return 1.0
+
+            atr_series = self.market_analyzer.calculate_atr(df_daily, period=14)
+            if atr_series is None or atr_series.isna().all():
+                return 1.0
+
+            atr_current = atr_series.iloc[-1]   # ATR del día actual
+            atr_avg     = atr_series.iloc[-20:-1].mean()  # promedio últimos 20 días
+
+            if atr_avg <= 0:
+                return 1.0
+
+            ratio = atr_current / atr_avg
+
+            if ratio >= ATR_HIGH_VOL_THRESHOLD:
+                logger.info(
+                    f"{symbol}: alta volatilidad detectada "
+                    f"(ATR ratio: {ratio:.2f}x) — SL ampliado x{ATR_HIGH_VOL_SL_MULTIPLIER}"
+                )
+                return ATR_HIGH_VOL_SL_MULTIPLIER
+
+            elif ratio <= ATR_LOW_VOL_THRESHOLD:
+                logger.debug(
+                    f"{symbol}: baja volatilidad "
+                    f"(ATR ratio: {ratio:.2f}x) — SL reducido x{ATR_LOW_VOL_SL_MULTIPLIER}"
+                )
+                return ATR_LOW_VOL_SL_MULTIPLIER
+
+            return 1.0
+
+        except Exception as e:
+            logger.error(f"Error calculando volatilidad para {symbol}: {e}")
+            return 1.0  # en caso de error, usar multiplicador neutro
+
     def _handle_market_closed(self):
         """
         Maneja el rechazo 10018 (Market closed).
@@ -216,6 +477,18 @@ class StrategyBase(ABC):
     def execute_signal(self, symbol: str, signal: Dict) -> bool:
         """Ejecuta una senal de trading con todas las protecciones activas."""
         try:
+            # 0. Filtro de sesion — no abrir nuevas posiciones fuera de horario
+            if not self._is_trading_session():
+                return False
+
+            # 0b. Filtro de correlacion — evita doble exposicion al mismo par USD
+            if self._is_correlated_blocked(symbol, signal.get('direction', '')):
+                return False
+
+            # 0c. Filtro de noticias — no operar cerca de eventos de alto impacto
+            if self._is_news_blackout():
+                return False
+
             # 1. Posicion ya abierta por este bot
             if self._has_open_position(symbol):
                 logger.info(
