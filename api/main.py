@@ -13,6 +13,11 @@ from api.routers import account, market, orders, strategies, analysis
 from api.core.connection_manager import ConnectionManager
 from api.core.trading_service import TradingService
 from utils.logger import get_logger
+try:
+    from utils.telegram_notifier import alert_server_start
+    _TELEGRAM_OK = True
+except ImportError:
+    _TELEGRAM_OK = False
 
 logger = get_logger(__name__)
 
@@ -37,6 +42,10 @@ async def lifespan(app: FastAPI):
             logger.info(f"🤖 Auto-arranque: {launched} bots relanzados automáticamente")
         else:
             logger.info("🤖 Auto-arranque: sin bots previos configurados")
+
+        # Alerta Telegram de arranque
+        if _TELEGRAM_OK:
+            alert_server_start(launched)
     else:
         logger.warning("⚠️ Servicio de trading no pudo conectar a MT5 al inicio")
     

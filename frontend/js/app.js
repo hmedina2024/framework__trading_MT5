@@ -79,6 +79,8 @@ function navigateTo(page) {
         strategies:  'Estrategias Automáticas',
         positions:   'Posiciones',
         seguimiento: 'Seguimiento de Bots',
+        backtest: 'Backtest de Estrategias',
+        rendimiento: 'Rendimiento',
         settings:    'Configuración'
     };
     document.getElementById('pageTitle').textContent = titles[page] || page;
@@ -94,6 +96,8 @@ function loadCurrentPage() {
         case 'analysis':     break;
         case 'strategies':   loadStrategies(); break;
         case 'positions':    loadAllPositions(); break;
+        case 'backtest':    break; // carga bajo demanda
+        case 'rendimiento':  rendLoadChart(_rendDays || 30); break;
         case 'seguimiento':  if (typeof segRefresh === 'function') segRefresh(); break;
         case 'settings':     loadSettings(); break;
     }
@@ -953,5 +957,273 @@ async function segLoadFromHistory(days = 30) {
         console.error('segLoadFromHistory error:', err);
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = '⟳ Sincronizar MT5'; }
+    }
+}
+
+// ============================================================================
+// MÓDULO DE RENDIMIENTO — Equity Curve, Drawdown, P&L por estrategia
+// ============================================================================
+
+let _rendChartEquity   = null;
+let _rendChartStrategy = null;
+let _rendChartHourly   = null;
+let _rendDays          = 30;
+
+async function rendLoadChart(days = 30) {
+    _rendDays = days;
+
+    // Actualizar botones activos
+    ['7d','30d','90d'].forEach(d => {
+        const btn = document.getElementById(`rend-btn-${d}`);
+        if (btn) btn.classList.toggle('btn-active', `${days}d` === d ||
+            (days === 7 && d === '7d') || (days === 30 && d === '30d') || (days === 90 && d === '90d'));
+    });
+
+    try {
+        const data = await OrdersAPI.getHistory(days);
+        if (!data || !data.deals || data.deals.length === 0) {
+            rendShowEmpty();
+            return;
+        }
+
+        const deals = data.deals;
+
+        // --- Equity Curve ---
+        // Construir serie temporal: balance acumulado a lo largo del tiempo
+        const accountData = await AccountAPI.getInfo();
+        const currentBalance = accountData ? accountData.balance : 1000;
+
+        // Ordenar deals por tiempo
+        const sorted = [...deals].sort((a, b) => new Date(a.time) - new Date(b.time));
+
+        // Calcular P&L acumulado desde el pasado
+        let totalPnl = sorted.reduce((sum, d) => sum + (d.profit || 0) + (d.commission || 0) + (d.swap || 0), 0);
+        let runningBalance = currentBalance - totalPnl;
+
+        const equityLabels = [];
+        const equityValues = [];
+        let peak = runningBalance;
+        let maxDrawdown = 0;
+        const drawdownValues = [];
+
+        for (const deal of sorted) {
+            const net = (deal.profit || 0) + (deal.commission || 0) + (deal.swap || 0);
+            runningBalance += net;
+            const date = new Date(deal.time);
+            equityLabels.push(date.toLocaleDateString('es-CO', {month:'short', day:'numeric'}));
+            equityValues.push(parseFloat(runningBalance.toFixed(2)));
+
+            if (runningBalance > peak) peak = runningBalance;
+            const dd = peak > 0 ? ((peak - runningBalance) / peak * 100) : 0;
+            if (dd > maxDrawdown) maxDrawdown = dd;
+            drawdownValues.push(parseFloat(dd.toFixed(2)));
+        }
+
+        // Agregar punto actual
+        equityLabels.push('Ahora');
+        equityValues.push(parseFloat(currentBalance.toFixed(2)));
+
+        // Actualizar métricas
+        const startBalance = equityValues[0] || currentBalance;
+        const pnl = currentBalance - startBalance;
+        document.getElementById('rend-balance').textContent   = '$' + currentBalance.toFixed(2);
+        document.getElementById('rend-pnl').textContent       = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
+        document.getElementById('rend-pnl').style.color       = pnl >= 0 ? 'var(--success)' : 'var(--danger)';
+        document.getElementById('rend-drawdown').textContent  = maxDrawdown.toFixed(2) + '%';
+        document.getElementById('rend-trades').textContent    = deals.length;
+
+        // Renderizar Equity Chart
+        const ctxEq = document.getElementById('equityChart').getContext('2d');
+        if (_rendChartEquity) _rendChartEquity.destroy();
+        _rendChartEquity = new Chart(ctxEq, {
+            type: 'line',
+            data: {
+                labels: equityLabels,
+                datasets: [{
+                    label: 'Balance',
+                    data: equityValues,
+                    borderColor: '#3B6D11',
+                    backgroundColor: 'rgba(59,109,17,0.08)',
+                    borderWidth: 2,
+                    pointRadius: 2,
+                    fill: true,
+                    tension: 0.3
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: { ticks: { maxTicksLimit: 10, color: '#888' }, grid: { color: 'rgba(128,128,128,0.1)' } },
+                    y: { ticks: { color: '#888', callback: v => '$' + v.toFixed(0) }, grid: { color: 'rgba(128,128,128,0.1)' } }
+                }
+            }
+        });
+
+        // --- P&L por estrategia ---
+        const stratMap = {};
+        for (const deal of deals) {
+            const strat = deal.strategy || 'DESCONOCIDA';
+            if (!stratMap[strat]) stratMap[strat] = 0;
+            stratMap[strat] += (deal.profit || 0) + (deal.commission || 0) + (deal.swap || 0);
+        }
+        const stratLabels = Object.keys(stratMap).sort((a, b) => stratMap[b] - stratMap[a]);
+        const stratValues = stratLabels.map(s => parseFloat(stratMap[s].toFixed(2)));
+        const stratColors = stratValues.map(v => v >= 0 ? '#3B6D11' : '#A32D2D');
+
+        const ctxSt = document.getElementById('strategyPnlChart').getContext('2d');
+        if (_rendChartStrategy) _rendChartStrategy.destroy();
+        _rendChartStrategy = new Chart(ctxSt, {
+            type: 'bar',
+            data: {
+                labels: stratLabels,
+                datasets: [{ data: stratValues, backgroundColor: stratColors, borderRadius: 4 }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: { ticks: { color: '#888', font: { size: 11 } }, grid: { display: false } },
+                    y: { ticks: { color: '#888', callback: v => '$' + v.toFixed(0) }, grid: { color: 'rgba(128,128,128,0.1)' } }
+                }
+            }
+        });
+
+        // --- Trades por hora ---
+        const hourMap = new Array(24).fill(0);
+        const hourWins = new Array(24).fill(0);
+        for (const deal of deals) {
+            const h = new Date(deal.time).getUTCHours();
+            hourMap[h]++;
+            const net = (deal.profit || 0) + (deal.commission || 0) + (deal.swap || 0);
+            if (net >= 0) hourWins[h]++;
+        }
+
+        const ctxHr = document.getElementById('hourlyChart').getContext('2d');
+        if (_rendChartHourly) _rendChartHourly.destroy();
+        _rendChartHourly = new Chart(ctxHr, {
+            type: 'bar',
+            data: {
+                labels: Array.from({length:24}, (_,i) => `${i}h`),
+                datasets: [
+                    { label: 'Trades', data: hourMap, backgroundColor: 'rgba(55,138,221,0.5)', borderRadius: 3 },
+                    { label: 'Wins',   data: hourWins, backgroundColor: 'rgba(59,109,17,0.7)',  borderRadius: 3 }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: true, labels: { color: '#888', font: { size: 11 } } } },
+                scales: {
+                    x: { ticks: { color: '#888', font: { size: 10 }, maxRotation: 0 }, grid: { display: false } },
+                    y: { ticks: { color: '#888' }, grid: { color: 'rgba(128,128,128,0.1)' } }
+                }
+            }
+        });
+
+    } catch (err) {
+        console.error('rendLoadChart error:', err);
+        rendShowEmpty();
+    }
+}
+
+function rendShowEmpty() {
+    document.getElementById('rend-balance').textContent  = '--';
+    document.getElementById('rend-pnl').textContent      = '--';
+    document.getElementById('rend-drawdown').textContent = '--';
+    document.getElementById('rend-trades').textContent   = '0';
+}
+
+// ============================================================================
+// MÓDULO DE BACKTESTING
+// ============================================================================
+
+let _btChart = null;
+
+async function runBacktest() {
+    const symbol      = document.getElementById('bt-symbol').value;
+    const strategy    = document.getElementById('bt-strategy').value;
+    const days        = parseInt(document.getElementById('bt-days').value);
+    const balance     = parseFloat(document.getElementById('bt-balance').value) || 1000;
+    const riskPct     = parseFloat(document.getElementById('bt-risk').value) / 100 || 0.01;
+
+    const btnEl       = document.getElementById('bt-run-btn');
+    const resultsEl   = document.getElementById('bt-results');
+    const loadingEl   = document.getElementById('bt-loading');
+
+    btnEl.disabled    = true;
+    btnEl.textContent = '⏳ Ejecutando...';
+    resultsEl.style.display  = 'none';
+    loadingEl.style.display  = 'flex';
+
+    try {
+        const r = await StrategiesAPI.backtest(symbol, strategy, days, balance, riskPct);
+
+        loadingEl.style.display  = 'none';
+        resultsEl.style.display  = 'block';
+
+        const pnlColor = r.total_pnl >= 0 ? '#3B6D11' : '#A32D2D';
+        const metrics = [
+            { label: 'P&L total',      value: `${r.total_pnl >= 0 ? '+' : ''}$${r.total_pnl.toFixed(2)}`, color: pnlColor },
+            { label: 'Retorno',        value: `${r.total_pnl_pct >= 0 ? '+' : ''}${r.total_pnl_pct.toFixed(2)}%`, color: pnlColor },
+            { label: 'Win Rate',       value: `${r.win_rate.toFixed(1)}%`, color: r.win_rate >= 50 ? '#3B6D11' : '#A32D2D' },
+            { label: 'Trades',         value: r.trades },
+            { label: 'Profit Factor',  value: r.profit_factor.toFixed(2) },
+            { label: 'Max Drawdown',   value: `-${r.max_drawdown.toFixed(2)}%`, color: '#A32D2D' },
+            { label: 'Gan. promedio',  value: `+$${r.avg_win.toFixed(2)}`, color: '#3B6D11' },
+            { label: 'Pérd. promedio', value: `-$${r.avg_loss.toFixed(2)}`, color: '#A32D2D' },
+        ];
+
+        document.getElementById('bt-metrics').innerHTML = metrics.map(m => `
+            <div style="background:var(--color-background-secondary);padding:.7rem;border-radius:var(--border-radius-md)">
+                <div style="font-size:11px;color:var(--color-text-secondary)">${m.label}</div>
+                <div style="font-size:17px;font-weight:500;color:${m.color || 'var(--color-text-primary)'}">
+                    ${m.value}
+                </div>
+            </div>`).join('');
+
+        // Equity curve
+        if (r.equity_curve && r.equity_curve.length > 1) {
+            const ctx = document.getElementById('btEquityChart').getContext('2d');
+            if (_btChart) _btChart.destroy();
+            const balances = r.equity_curve.map(p => p.balance);
+            const colors   = balances.map(b => b >= balance ? '#3B6D11' : '#A32D2D');
+            _btChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: r.equity_curve.map((_, i) => i === 0 ? 'Inicio' : `T${i}`),
+                    datasets: [{
+                        data: balances,
+                        borderColor: r.total_pnl >= 0 ? '#3B6D11' : '#A32D2D',
+                        backgroundColor: r.total_pnl >= 0 ? 'rgba(59,109,17,0.08)' : 'rgba(163,45,45,0.08)',
+                        borderWidth: 2,
+                        pointRadius: 0,
+                        fill: true,
+                        tension: 0.3
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { display: false },
+                        y: { ticks: { color: '#888', callback: v => '$' + v.toFixed(0) },
+                             grid: { color: 'rgba(128,128,128,0.1)' } }
+                    }
+                }
+            });
+        }
+
+    } catch (err) {
+        loadingEl.style.display = 'none';
+        resultsEl.style.display = 'block';
+        document.getElementById('bt-metrics').innerHTML =
+            `<div style="color:var(--color-text-danger);grid-column:span 2">Error: ${err.message}</div>`;
+    } finally {
+        btnEl.disabled    = false;
+        btnEl.textContent = '▶ Ejecutar Backtest';
     }
 }

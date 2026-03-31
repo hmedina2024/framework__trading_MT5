@@ -40,3 +40,42 @@ async def stop_strategy(strategy_id: str, service: TradingService = Depends(get_
     if not success:
         raise HTTPException(status_code=404, detail="Estrategia no encontrada")
     return {"status": "stopped", "id": strategy_id}
+
+@router.post("/backtest")
+async def run_backtest(
+    symbol: str,
+    strategy_type: str = "MACD",
+    days: int = 90,
+    initial_balance: float = 1000.0,
+    risk_pct: float = 0.01,
+    service: TradingService = Depends(get_trading_service)
+):
+    """
+    Ejecuta un backtest de la estrategia sobre datos históricos de MT5.
+    No abre posiciones reales — simulación completa walk-forward.
+
+    Params:
+      symbol:          par a testear (EURUSD, XAUUSD, etc.)
+      strategy_type:   tipo de estrategia (MACD, BOLLINGER, EMA_CROSS, etc.)
+      days:            días de historial a usar (30-365)
+      initial_balance: balance inicial de simulación (default 1000)
+      risk_pct:        riesgo por trade como decimal (0.01 = 1%)
+    """
+    if not service.is_connected():
+        raise HTTPException(status_code=503, detail="MT5 no conectado")
+
+    if days < 10 or days > 365:
+        raise HTTPException(status_code=400, detail="days debe estar entre 10 y 365")
+
+    result = service.run_backtest(
+        symbol=symbol.upper(),
+        strategy_type=strategy_type.upper(),
+        days=days,
+        initial_balance=initial_balance,
+        risk_pct=risk_pct
+    )
+
+    if 'error' in result:
+        raise HTTPException(status_code=400, detail=result['error'])
+
+    return result

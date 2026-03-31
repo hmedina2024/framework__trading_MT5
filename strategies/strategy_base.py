@@ -22,6 +22,13 @@ import pandas as pd
 
 from utils.logger import get_logger
 from models.trade_models import TradeRequest, OrderType, Position
+try:
+    from utils.telegram_notifier import (
+        alert_trade_opened, alert_trade_closed, alert_balance_drop
+    )
+    _TELEGRAM_AVAILABLE = True
+except ImportError:
+    _TELEGRAM_AVAILABLE = False
 
 logger = get_logger(__name__)
 
@@ -98,6 +105,25 @@ ATR_HIGH_VOL_THRESHOLD       = 1.5   # ATR actual > 1.5x promedio = alta volatil
 ATR_HIGH_VOL_SL_MULTIPLIER   = 1.5   # ampliar SL x1.5 en días de alta volatilidad
 ATR_LOW_VOL_THRESHOLD        = 0.7   # ATR actual < 0.7x promedio = baja volatilidad
 ATR_LOW_VOL_SL_MULTIPLIER    = 0.85  # reducir SL x0.85 en días tranquilos
+
+# ---------------------------------------------------------------------------
+# Escalado automático de posición en estrategias ganadoras
+# Si una estrategia supera WIN_RATE_THRESHOLD con al menos MIN_TRADES_TO_SCALE
+# trades, el riesgo por trade sube gradualmente hasta MAX_RISK_SCALED.
+# El escalado es conservador: sube de a 0.1% por nivel para no sobre-exponer.
+# Criterios para escalar:
+#   - Win rate >= WIN_RATE_THRESHOLD (default 65%)
+#   - Al menos MIN_TRADES_TO_SCALE trades (default 10) — base estadística mínima
+#   - Riesgo máximo escalado: MAX_RISK_SCALED (default 2.0%)
+# Criterios para reducir:
+#   - Win rate cae bajo WIN_RATE_REDUCE (default 45%) — reducir a riesgo base
+# ---------------------------------------------------------------------------
+AUTO_SCALE_ENABLED      = True
+WIN_RATE_THRESHOLD      = 0.65   # 65% WR para empezar a escalar
+WIN_RATE_REDUCE         = 0.45   # 45% WR para reducir al riesgo base
+MIN_TRADES_TO_SCALE     = 10     # mínimo de trades para evaluar escalado
+MAX_RISK_SCALED         = 0.02   # tope máximo: 2% aunque WR sea 100%
+SCALE_STEP              = 0.001  # incremento por nivel: +0.1% por cada 5% sobre umbral
 
 
 class StrategyBase(ABC):
@@ -427,6 +453,65 @@ class StrategyBase(ABC):
             logger.error(f"Error calculando volatilidad para {symbol}: {e}")
             return 1.0  # en caso de error, usar multiplicador neutro
 
+    def _get_scaled_risk(self) -> float:
+        """
+        Calcula el riesgo por trade ajustado según el rendimiento histórico
+        de esta estrategia. Escala conservadoramente hacia arriba si la
+        estrategia está funcionando bien, reduce si está funcionando mal.
+
+        Retorna el porcentaje de riesgo a usar (ej: 0.01 = 1%, 0.015 = 1.5%)
+        El resultado nunca supera MAX_RISK_SCALED ni baja del riesgo base.
+        """
+        if not AUTO_SCALE_ENABLED:
+            return self.risk_manager.max_risk_per_trade
+
+        try:
+            base_risk = self.risk_manager.max_risk_per_trade
+            trades    = self._stats.get('trades_count', 0)
+            wins      = self._stats.get('wins', 0)
+
+            # Sin suficientes trades — usar riesgo base
+            if trades < MIN_TRADES_TO_SCALE:
+                return base_risk
+
+            win_rate = wins / trades
+
+            # Win rate bajo umbral de reducción — usar riesgo base
+            if win_rate < WIN_RATE_REDUCE:
+                if self._stats.get('_scale_logged_reduce') != round(win_rate, 2):
+                    logger.info(
+                        f"{self.name}: riesgo en base ({base_risk*100:.1f}%) — "
+                        f"WR {win_rate*100:.1f}% < umbral de reduccion {WIN_RATE_REDUCE*100:.0f}%"
+                    )
+                    self._stats['_scale_logged_reduce'] = round(win_rate, 2)
+                return base_risk
+
+            # Win rate bajo umbral de escalado — usar riesgo base sin escalar
+            if win_rate < WIN_RATE_THRESHOLD:
+                return base_risk
+
+            # Win rate >= umbral — calcular escalado
+            # Por cada 5% sobre el umbral, sumar un SCALE_STEP
+            excess_pct   = win_rate - WIN_RATE_THRESHOLD
+            scale_levels = int(excess_pct / 0.05)  # un nivel cada 5% de WR extra
+            scaled_risk  = base_risk + (scale_levels * SCALE_STEP)
+            scaled_risk  = min(scaled_risk, MAX_RISK_SCALED)
+
+            if scaled_risk > base_risk:
+                if self._stats.get('_scale_logged_up') != round(scaled_risk, 4):
+                    logger.info(
+                        f"{self.name}: riesgo ESCALADO a {scaled_risk*100:.1f}% "
+                        f"(WR {win_rate*100:.1f}%, {trades} trades, "
+                        f"base {base_risk*100:.1f}%, max {MAX_RISK_SCALED*100:.1f}%)"
+                    )
+                    self._stats['_scale_logged_up'] = round(scaled_risk, 4)
+
+            return scaled_risk
+
+        except Exception as e:
+            logger.error(f"Error calculando riesgo escalado: {e}")
+            return self.risk_manager.max_risk_per_trade
+
     def _handle_market_closed(self):
         """
         Maneja el rechazo 10018 (Market closed).
@@ -531,9 +616,11 @@ class StrategyBase(ABC):
                 )
                 return False
 
-            # 7. Calcular volumen
+            # 7. Calcular volumen con riesgo escalado si la estrategia lo merece
+            scaled_risk = self._get_scaled_risk()
             volume = self.risk_manager.calculate_position_size(
-                symbol, prices['entry'], prices['stop_loss']
+                symbol, prices['entry'], prices['stop_loss'],
+                risk_percentage=scaled_risk
             )
             if not volume:
                 logger.error(f"No se pudo calcular tamanio de posicion para {symbol}")
@@ -723,6 +810,25 @@ class StrategyBase(ABC):
             f"{symbol} hoy: {daily_count}/{MAX_DAILY_TRADES_PER_SYMBOL}"
         )
 
+        # Alerta Telegram
+        if _TELEGRAM_AVAILABLE:
+            try:
+                positions = self.connector.get_positions(symbol)
+                pos = next((p for p in positions if p.ticket == result.ticket), None)
+                if pos:
+                    alert_trade_opened(
+                        strategy  = self.name,
+                        symbol    = symbol,
+                        direction = pos.type,
+                        entry     = pos.price_open,
+                        sl        = pos.stop_loss or 0,
+                        tp        = pos.take_profit or 0,
+                        volume    = pos.volume,
+                        risk_pct  = self.risk_manager.max_risk_per_trade
+                    )
+            except Exception as e:
+                logger.debug(f"Telegram alert error: {e}")
+
     def on_trade_closed(self, position: Position, result) -> None:
         """Callback cuando se cierra una operacion. Activa cooldown."""
         logger.info(
@@ -735,6 +841,18 @@ class StrategyBase(ABC):
 
         # Activar cooldown para el simbolo
         self._set_cooldown(position.symbol)
+
+        # Alerta Telegram
+        if _TELEGRAM_AVAILABLE:
+            try:
+                alert_trade_closed(
+                    strategy  = self.name,
+                    symbol    = position.symbol,
+                    direction = position.type,
+                    profit    = position.profit,
+                )
+            except Exception as e:
+                logger.debug(f"Telegram alert error: {e}")
 
         self.update_stats(position.profit)
 

@@ -348,6 +348,224 @@ class TradingService:
             logger.error(f"Error al iniciar estrategia {strategy_id}: {e}")
             return False
             
+    def run_backtest(
+        self,
+        symbol: str,
+        strategy_type: str,
+        days: int = 90,
+        initial_balance: float = 1000.0,
+        risk_pct: float = 0.01
+    ) -> dict:
+        """
+        Ejecuta un backtest simple sobre datos históricos de MT5.
+        Descarga velas H1 del período indicado, simula las señales
+        de la estrategia vela a vela y calcula métricas de rendimiento.
+        No abre posiciones reales — es completamente simulado.
+        """
+        if not self.is_connected():
+            return {'error': 'MT5 no conectado'}
+
+        try:
+            import MetaTrader5 as mt5
+            from datetime import datetime, timedelta
+
+            # Mapear timeframe
+            TF_MAP = {
+                'MA_CROSS': mt5.TIMEFRAME_H1, 'RSI': mt5.TIMEFRAME_H1,
+                'BOLLINGER': mt5.TIMEFRAME_H1, 'MACD': mt5.TIMEFRAME_H1,
+                'BREAKOUT': mt5.TIMEFRAME_H4, 'SUPERTREND': mt5.TIMEFRAME_H1,
+                'EMA_CROSS': mt5.TIMEFRAME_H1, 'WILLIAMS_R': mt5.TIMEFRAME_H1,
+            }
+            timeframe = TF_MAP.get(strategy_type, mt5.TIMEFRAME_H1)
+            candles_needed = days * 24 if timeframe == mt5.TIMEFRAME_H1 else days * 6
+
+            # Obtener datos históricos
+            df_full = self.market_analyzer.get_candles(symbol, timeframe, count=candles_needed + 250)
+            if df_full is None or df_full.empty:
+                return {'error': f'No hay datos históricos para {symbol}'}
+
+            # Instanciar estrategia en modo simulación (sin magic, sin órdenes reales)
+            common_args = dict(
+                connector=self.connector,
+                order_manager=self.order_manager,
+                risk_manager=self.risk_manager,
+                market_analyzer=self.market_analyzer,
+                symbols=[symbol],
+                magic_number=999999
+            )
+            strategy_map = {
+                'MA_CROSS':   ('MovingAverageCrossStrategy', mt5.TIMEFRAME_H1),
+                'RSI':        ('RSIStrategy', mt5.TIMEFRAME_H1),
+                'BOLLINGER':  ('BollingerBandsStrategy', mt5.TIMEFRAME_H1),
+                'MACD':       ('MACDStrategy', mt5.TIMEFRAME_H1),
+                'BREAKOUT':   ('BreakoutStrategy', mt5.TIMEFRAME_H4),
+                'SUPERTREND': ('SupertrendStrategy', mt5.TIMEFRAME_H1),
+                'EMA_CROSS':  ('EMACrossoverStrategy', mt5.TIMEFRAME_H1),
+                'WILLIAMS_R': ('WilliamsRStrategy', mt5.TIMEFRAME_H1),
+            }
+            class_name, tf = strategy_map.get(strategy_type, ('MACDStrategy', mt5.TIMEFRAME_H1))
+            strategy_classes = {
+                'MovingAverageCrossStrategy': MovingAverageCrossStrategy,
+                'RSIStrategy': RSIStrategy,
+                'BollingerBandsStrategy': BollingerBandsStrategy,
+                'MACDStrategy': MACDStrategy,
+                'BreakoutStrategy': BreakoutStrategy,
+                'SupertrendStrategy': SupertrendStrategy,
+                'EMACrossoverStrategy': EMACrossoverStrategy,
+                'WilliamsRStrategy': WilliamsRStrategy,
+            }
+            StratClass = strategy_classes.get(class_name, MACDStrategy)
+            strategy = StratClass(**common_args, timeframe=tf)
+
+            # Simular vela a vela (walk-forward)
+            balance      = initial_balance
+            peak_balance = initial_balance
+            max_drawdown = 0.0
+            trades       = []
+            equity_curve = [{'balance': round(balance, 2), 'idx': 0}]
+
+            # Warm-up: necesitamos al menos 210 velas para indicadores (EMA200 + buffer)
+            warmup = 210
+            total  = len(df_full)
+
+            for i in range(warmup, total - 1):
+                df_slice = df_full.iloc[:i+1].copy()
+                signal = strategy.analyze(symbol, df_slice)
+
+                if not signal:
+                    continue
+
+                direction = signal['direction']
+                entry_bar = df_full.iloc[i+1]  # siguiente vela = entrada simulada
+                entry     = entry_bar['open']
+
+                # Calcular SL/TP usando ATR de las últimas 14 velas
+                atr_series = self.market_analyzer.calculate_atr(df_slice.tail(20))
+                atr = atr_series.iloc[-1] if not atr_series.empty else entry * 0.001
+
+                # Usar multiplicadores base de la estrategia
+                sl_mult = 2.0
+                tp_mult = 3.0
+                if strategy_type in ('EMA_CROSS', 'WILLIAMS_R', 'RSI'):
+                    sl_mult, tp_mult = 1.5, 2.5
+                elif strategy_type == 'BREAKOUT':
+                    sl_mult, tp_mult = 2.0, 4.0
+
+                if direction == 'BUY':
+                    sl = entry - atr * sl_mult
+                    tp = entry + atr * tp_mult
+                else:
+                    sl = entry + atr * sl_mult
+                    tp = entry - atr * tp_mult
+
+                # Calcular volumen (1% del balance)
+                risk_money  = balance * risk_pct
+                risk_points = abs(entry - sl)
+                symbol_info = self.connector.get_symbol_info(symbol)
+                if not symbol_info or risk_points <= 0:
+                    continue
+                risk_per_lot = (risk_points / symbol_info.point) * symbol_info.tick_value
+                if risk_per_lot <= 0:
+                    continue
+                volume = min(max(risk_money / risk_per_lot, symbol_info.volume_min), symbol_info.volume_max)
+                volume = symbol_info.normalize_volume(volume)
+
+                # Simular resultado mirando las siguientes velas (máx 50)
+                result_pnl = None
+                close_reason = 'timeout'
+                for j in range(i+2, min(i+52, total)):
+                    bar = df_full.iloc[j]
+                    if direction == 'BUY':
+                        if bar['low'] <= sl:
+                            result_pnl  = -(risk_points / symbol_info.point) * symbol_info.tick_value * volume
+                            close_reason = 'SL'
+                            break
+                        if bar['high'] >= tp:
+                            reward      = abs(tp - entry)
+                            result_pnl  = (reward / symbol_info.point) * symbol_info.tick_value * volume
+                            close_reason = 'TP'
+                            break
+                    else:
+                        if bar['high'] >= sl:
+                            result_pnl  = -(risk_points / symbol_info.point) * symbol_info.tick_value * volume
+                            close_reason = 'SL'
+                            break
+                        if bar['low'] <= tp:
+                            reward      = abs(entry - tp)
+                            result_pnl  = (reward / symbol_info.point) * symbol_info.tick_value * volume
+                            close_reason = 'TP'
+                            break
+
+                if result_pnl is None:
+                    # Cerrar al precio de la última vela revisada
+                    close_price = df_full.iloc[min(i+51, total-1)]['close']
+                    if direction == 'BUY':
+                        result_pnl = ((close_price - entry) / symbol_info.point) * symbol_info.tick_value * volume
+                    else:
+                        result_pnl = ((entry - close_price) / symbol_info.point) * symbol_info.tick_value * volume
+
+                balance += result_pnl
+                if balance > peak_balance:
+                    peak_balance = balance
+                dd = (peak_balance - balance) / peak_balance * 100 if peak_balance > 0 else 0
+                if dd > max_drawdown:
+                    max_drawdown = dd
+
+                trades.append({
+                    'idx':       i,
+                    'direction': direction,
+                    'entry':     round(entry, 5),
+                    'pnl':       round(result_pnl, 2),
+                    'reason':    close_reason,
+                    'balance':   round(balance, 2),
+                })
+                equity_curve.append({'balance': round(balance, 2), 'idx': len(trades)})
+
+            # Métricas finales
+            if not trades:
+                return {
+                    'symbol': symbol, 'strategy': strategy_type,
+                    'days': days, 'trades': 0, 'message': 'Sin señales en el período'
+                }
+
+            wins        = [t for t in trades if t['pnl'] >= 0]
+            losses      = [t for t in trades if t['pnl'] < 0]
+            win_rate    = len(wins) / len(trades) * 100
+            avg_win     = sum(t['pnl'] for t in wins) / len(wins) if wins else 0
+            avg_loss    = abs(sum(t['pnl'] for t in losses) / len(losses)) if losses else 0
+            profit_factor = (sum(t['pnl'] for t in wins) / abs(sum(t['pnl'] for t in losses))
+                             if losses and sum(t['pnl'] for t in losses) != 0 else 999)
+            total_pnl   = balance - initial_balance
+
+            logger.info(
+                f"Backtest {strategy_type}/{symbol} ({days}d): "
+                f"{len(trades)} trades, WR {win_rate:.1f}%, P&L ${total_pnl:.2f}"
+            )
+
+            return {
+                'symbol':          symbol,
+                'strategy':        strategy_type,
+                'strategy_name':   self.STRATEGY_CATALOG.get(strategy_type, {}).get('name', strategy_type),
+                'days':            days,
+                'initial_balance': initial_balance,
+                'final_balance':   round(balance, 2),
+                'total_pnl':       round(total_pnl, 2),
+                'total_pnl_pct':   round(total_pnl / initial_balance * 100, 2),
+                'trades':          len(trades),
+                'wins':            len(wins),
+                'losses':          len(losses),
+                'win_rate':        round(win_rate, 2),
+                'avg_win':         round(avg_win, 2),
+                'avg_loss':        round(avg_loss, 2),
+                'profit_factor':   round(profit_factor, 2),
+                'max_drawdown':    round(max_drawdown, 2),
+                'equity_curve':    equity_curve[-100:],  # últimos 100 puntos para el gráfico
+            }
+
+        except Exception as e:
+            logger.error(f"Error en backtest: {e}", exc_info=True)
+            return {'error': str(e)}
+
     def stop_strategy(self, strategy_id: str) -> bool:
         if strategy_id in self.active_strategies:
             self.active_strategies[strategy_id].stop()

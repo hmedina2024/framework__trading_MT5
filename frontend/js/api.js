@@ -82,6 +82,13 @@ const StrategiesAPI = {
     start: (symbol, strategyType = 'MA_CROSS') =>
         apiRequest(`/strategies/start/${symbol}?strategy_type=${strategyType}`, 'POST'),
     stop: (strategyId) => apiRequest(`/strategies/stop/${strategyId}`, 'POST'),
+    backtest: (symbol, strategyType, days = 90, initialBalance = 1000, riskPct = 0.01) => {
+        const params = new URLSearchParams({
+            symbol, strategy_type: strategyType,
+            days, initial_balance: initialBalance, risk_pct: riskPct
+        });
+        return apiRequest(`/strategies/backtest?${params}`, 'POST');
+    },
 };
 
 // ============ ANALYSIS ============
