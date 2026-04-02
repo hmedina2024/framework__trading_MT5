@@ -85,6 +85,19 @@ class WilliamsRStrategy(StrategyBase):
             wr_curr = current['williams_r']
             wr_prev = previous['williams_r']
 
+            # Filtro ADX: Williams %R es indicador adelantado (reversión).
+            # En mercados con tendencia fuerte (ADX > 25) las reversiones fallan.
+            # Solo operar cuando ADX < 25 — mercado lateral donde las reversiones son reales.
+            adx = self.market_analyzer.calculate_adx(df)
+            if adx is not None and not pd.isna(adx):
+                ADX_MAX_THRESHOLD = 25.0
+                if adx > ADX_MAX_THRESHOLD:
+                    logger.info(
+                        f"W%R {symbol}: señal bloqueada por ADX alto "
+                        f"(ADX={adx:.1f} > {ADX_MAX_THRESHOLD} — mercado en tendencia)"
+                    )
+                    return None
+
             # Senal de COMPRA: sale de sobreventa + tendencia alcista
             # Williams %R cruza de <= -80 a > -80
             if (wr_prev <= OVERSOLD_LEVEL and

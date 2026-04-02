@@ -13,7 +13,6 @@ import MetaTrader5 as mt5
 
 from strategies.strategy_base import StrategyBase
 from utils.logger import get_logger
-from models.trade_models import TradeRequest, OrderType
 
 logger = get_logger(__name__)
 
@@ -65,64 +64,6 @@ class BollingerBandsStrategy(StrategyBase):
             f"Desviaciones: {bb_std}, RSI: {rsi_period}"
         )
 
-    def execute_signal(self, symbol: str, signal: Dict) -> bool:
-        """
-        Ejecuta una señal de trading.
-        Este método es una copia del de la clase base para asegurar que se usa la
-        lógica de comentarios correcta, en caso de que la clase base no se recargue.
-        """
-        try:
-            if self._has_open_position(symbol):
-                logger.info(f"Ignorando señal para {symbol}: Ya existe una posición abierta gestionada por este bot.")
-                return False
-            
-            allowed, reason = self.risk_manager.is_trading_allowed()
-            if not allowed:
-                logger.warning(f"Trading no permitido: {reason}")
-                return False
-            
-            prices = self.calculate_entry_exit(symbol, signal)
-            
-            volume = self.risk_manager.calculate_position_size(
-                symbol,
-                prices['entry'],
-                prices['stop_loss']
-            )
-            
-            if not volume:
-                logger.error(f"No se pudo calcular tamaño de posición para {symbol}")
-                return False
-            
-            request = TradeRequest(
-                symbol=symbol,
-                order_type=OrderType.BUY if signal['direction'] == 'BUY' else OrderType.SELL,
-                volume=volume,
-                price=prices['entry'],
-                stop_loss=prices['stop_loss'],
-                take_profit=prices['take_profit'],
-                magic_number=self.magic_number,
-                comment="BB " + str(signal['direction'])  # Asegurar un string simple sin caracteres raros
-            )
-            
-            is_valid, msg = self.risk_manager.validate_trade(request)
-            if not is_valid:
-                logger.warning(f"Operación rechazada por riesgo: {msg}")
-                return False
-            
-            result = self.order_manager.open_position(request)
-            
-            if result.success:
-                logger.info(f"✅ Señal ejecutada exitosamente para {symbol}")
-                self.on_trade_opened(symbol, result)
-                return True
-            else:
-                logger.error(f"Error al ejecutar señal: {result.error_message}")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Error al ejecutar señal en {self.name}: {str(e)}", exc_info=True)
-            return False
-
     def analyze(self, symbol: str, df: pd.DataFrame) -> Optional[Dict]:
         try:
             # Calcular Bollinger Bands (retorna tupla: upper, middle, lower)
@@ -161,6 +102,19 @@ class BollingerBandsStrategy(StrategyBase):
                     logger.info(
                         f"BB {symbol}: señal bloqueada — EMA50 fuera de bandas "
                         f"(mercado en tendencia extrema)"
+                    )
+                    return None
+
+            # Filtro ADX: Bollinger es estrategia de reversión — no funciona en tendencias.
+            # ADX > 25 = tendencia fuerte = precio no va a revertir a la media.
+            # Solo operar cuando ADX < 25 (mercado lateral/sin dirección definida).
+            adx = self.market_analyzer.calculate_adx(df)
+            if adx is not None and not pd.isna(adx):
+                ADX_MAX_THRESHOLD = 25.0
+                if adx > ADX_MAX_THRESHOLD:
+                    logger.info(
+                        f"BB {symbol}: señal bloqueada por ADX alto "
+                        f"(ADX={adx:.1f} > {ADX_MAX_THRESHOLD} — mercado en tendencia)"
                     )
                     return None
 

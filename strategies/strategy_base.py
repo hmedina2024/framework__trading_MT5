@@ -842,6 +842,13 @@ class StrategyBase(ABC):
         # Activar cooldown para el simbolo
         self._set_cooldown(position.symbol)
 
+        # Notificar al risk_manager para activar cooldown anti re-entrada inmediata
+        # Esto previene el bug donde MT5 cierra por SL/TP y el bot reabre al instante
+        try:
+            self.risk_manager.notify_position_closed(position.symbol)
+        except Exception:
+            pass
+
         # Alerta Telegram
         if _TELEGRAM_AVAILABLE:
             try:

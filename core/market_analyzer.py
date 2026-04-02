@@ -33,25 +33,44 @@ class MarketAnalyzer:
         count: int = 100
     ) -> Optional[pd.DataFrame]:
         """
-        Obtiene exactamente `count` velas CERRADAS.
+        Obtiene velas historicas YA CERRADAS.
+        Descarta la ultima vela si todavia esta abierta (en curso).
 
-        MT5 siempre incluye la vela en curso (abierta) como ultima entrada.
-        La solucion robusta es pedir count+1 velas y descartar siempre la
-        ultima — independientemente de timezone o cambios de horario de verano.
-        Esto funciona con cualquier broker y en cualquier zona horaria.
+        Pepperstone MT5 usa UTC+2 como hora del servidor.
+        Colombia es UTC-5. Sin este fix los bots analizan la vela
+        actual que aun no cerro, y los cruces nunca se detectan.
         """
-        # Pedir 1 vela extra — la ultima siempre es la vela en curso (abierta)
+        # Pedir 1 vela extra para poder descartar la actual si esta abierta
         start_date = datetime.now()
         df = self.connector.get_historical_data(symbol, timeframe, start_date, count=count + 1)
 
         if df is None or df.empty:
             return df
 
-        # Descartar siempre la ultima vela (esta abierta, sus valores cambian cada tick)
-        df = df.iloc[:-1].reset_index(drop=True)
+        # Duracion de cada timeframe en segundos
+        TF_SECONDS = {
+            mt5.TIMEFRAME_M1:  60,
+            mt5.TIMEFRAME_M5:  300,
+            mt5.TIMEFRAME_M15: 900,
+            mt5.TIMEFRAME_M30: 1800,
+            mt5.TIMEFRAME_H1:  3600,
+            mt5.TIMEFRAME_H4:  14400,
+            mt5.TIMEFRAME_D1:  86400,
+        }
+        tf_secs = TF_SECONDS.get(timeframe, 3600)
 
-        logger.debug(f"Obtenidas {len(df)} velas cerradas de {symbol} "
-                     f"(ultima: {df['time'].iloc[-1]})")
+        # Comparar en hora UTC+2 (hora del servidor Pepperstone)
+        # Colombia es UTC-5, por lo que sumamos 7 horas
+        now_server = datetime.now() + timedelta(hours=7)
+        last_time  = df['time'].iloc[-1]
+        vela_cierra = last_time + timedelta(seconds=tf_secs)
+
+        if now_server < vela_cierra:
+            # La ultima vela aun no cerro — descartarla
+            df = df.iloc[:-1].reset_index(drop=True)
+            logger.debug(f"{symbol}: vela actual descartada, aun abierta hasta {vela_cierra}")
+
+        logger.debug(f"Obtenidas {len(df)} velas cerradas de {symbol}")
         return df
     
     def calculate_sma(self, df: pd.DataFrame, period: int, column: str = 'close') -> pd.Series:
@@ -345,6 +364,60 @@ class MarketAnalyzer:
         lowest_low   = df['low'].rolling(window=period).min()
         williams_r   = -100 * ((highest_high - df['close']) / (highest_high - lowest_low))
         return williams_r
+
+    def calculate_adx(
+        self,
+        df: pd.DataFrame,
+        period: int = 14
+    ) -> float:
+        """
+        Calcula el ADX (Average Directional Index) — mide la FUERZA de la tendencia.
+        No indica dirección, solo si el mercado está en tendencia o es lateral.
+
+        Interpretación:
+          ADX < 20  : sin tendencia (mercado lateral) — ideal para Bollinger/Williams %R
+          ADX 20-25 : tendencia débil emergente
+          ADX > 25  : tendencia fuerte — Bollinger/Williams %R generan señales falsas aquí
+          ADX > 40  : tendencia muy fuerte
+
+        Retorna el valor ADX actual (float) o None si hay error.
+        """
+        try:
+            if len(df) < period * 2 + 1:
+                return None
+
+            high  = df['high']
+            low   = df['low']
+            close = df['close']
+
+            # True Range
+            tr1 = high - low
+            tr2 = (high - close.shift()).abs()
+            tr3 = (low  - close.shift()).abs()
+            tr  = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+            # Directional Movement
+            up_move   = high.diff()
+            down_move = -low.diff()
+
+            dm_plus  = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+            dm_minus = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+
+            # Smoothed ATR, DM+ y DM-
+            atr_s    = tr.ewm(span=period, adjust=False).mean()
+            di_plus  = 100 * dm_plus.ewm(span=period, adjust=False).mean() / atr_s
+            di_minus = 100 * dm_minus.ewm(span=period, adjust=False).mean() / atr_s
+
+            # DX y ADX
+            dx  = 100 * (di_plus - di_minus).abs() / (di_plus + di_minus).replace(0, np.nan)
+            adx = dx.ewm(span=period, adjust=False).mean()
+
+            result = adx.iloc[-1]
+            return float(result) if not pd.isna(result) else None
+
+        except Exception as e:
+            logger.debug(f"Error calculando ADX: {e}")
+            return None
 
     def get_market_analysis(
         self,
