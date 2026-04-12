@@ -178,6 +178,10 @@ class StrategyBase(ABC):
         # Trailing stop: SL maximo registrado por ticket {ticket: float}
         self._trailing_sl: Dict[int, float] = {}
 
+        # Tracking de posiciones conocidas para detectar cierres por SL/TP de MT5
+        # {ticket: {'symbol': str, 'type': str}}
+        self._known_positions: Dict[int, Dict] = {}
+
         # Cache de noticias para no hacer requests en cada iteracion
         self._news_cache: List[Dict] = []
         self._news_cache_time: Optional[datetime] = None
@@ -769,15 +773,74 @@ class StrategyBase(ABC):
         """Verifica y gestiona posiciones abiertas."""
         positions = self.connector.get_positions(symbol)
 
+        # Detectar posiciones cerradas por MT5 via SL o TP
+        # Si una posicion conocida ya no aparece en get_positions, MT5 la cerro
+        current_tickets = {
+            p.ticket for p in positions
+            if p.magic_number == self.magic_number
+        }
+        known_for_symbol = {
+            ticket: info for ticket, info in list(self._known_positions.items())
+            if info.get('symbol') == symbol
+        }
+        for ticket, info in known_for_symbol.items():
+            if ticket not in current_tickets:
+                logger.info(
+                    f"{self.name} | {symbol}: posicion {ticket} cerrada por MT5 "
+                    f"(SL o TP alcanzado) — enviando alerta y activando cooldown"
+                )
+                # Activar cooldown de re-entrada
+                self._set_cooldown(symbol)
+                try:
+                    self.risk_manager.notify_position_closed(symbol)
+                except Exception:
+                    pass
+                # Alerta Telegram para cierres por SL/TP
+                if _TELEGRAM_AVAILABLE:
+                    try:
+                        import MetaTrader5 as mt5
+                        from datetime import timedelta
+                        now = datetime.now()
+                        deals = mt5.history_deals_get(
+                            now - timedelta(minutes=15), now
+                        )
+                        profit = 0.0
+                        reason = 'SL/TP'
+                        if deals:
+                            for d in reversed(deals):
+                                if d.symbol == symbol and d.entry == 1:
+                                    profit = d.profit + getattr(d, 'commission', 0) + getattr(d, 'swap', 0)
+                                    comment = (d.comment or '').lower()
+                                    reason = 'TP' if 'tp' in comment else 'SL'
+                                    break
+                        alert_trade_closed(
+                            strategy  = self.name,
+                            symbol    = symbol,
+                            direction = info.get('type', '?'),
+                            profit    = profit,
+                            reason    = reason
+                        )
+                    except Exception as e:
+                        logger.debug(f"Telegram SL/TP alert error: {e}")
+                # Remover de posiciones conocidas
+                self._known_positions.pop(ticket, None)
+
         for position in positions:
             if position.magic_number != self.magic_number:
                 continue
 
-            # Guard edad minima — evita cerrar en la misma iteracion que se abrio
+            # Registrar como posicion conocida
+            if position.ticket not in self._known_positions:
+                self._known_positions[position.ticket] = {
+                    'symbol': position.symbol,
+                    'type':   position.type,
+                }
+
+            # Guard edad minima
             if not self._is_position_old_enough(position.ticket):
                 continue
 
-            # Trailing stop — mover SL a favor si hay suficiente ganancia
+            # Trailing stop
             self._update_trailing_stop(position)
 
             if self.check_exit_conditions(position):
@@ -848,6 +911,9 @@ class StrategyBase(ABC):
             self.risk_manager.notify_position_closed(position.symbol)
         except Exception:
             pass
+
+        # Limpiar de posiciones conocidas (evita doble alerta si el bot también detecta el cierre)
+        self._known_positions.pop(position.ticket, None)
 
         # Alerta Telegram
         if _TELEGRAM_AVAILABLE:

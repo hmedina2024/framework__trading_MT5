@@ -56,10 +56,11 @@ def send_message(text: str, silent: bool = False) -> bool:
     def _send():
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
             payload = json.dumps({
-                'chat_id':              TELEGRAM_CHAT_ID,
-                'text':                 text,
-                'parse_mode':           'HTML',
+                'chat_id': TELEGRAM_CHAT_ID,
+                'text': text,
+                'parse_mode': 'HTML',
                 'disable_notification': silent,
             }).encode('utf-8')
 
@@ -69,10 +70,17 @@ def send_message(text: str, silent: bool = False) -> bool:
                 headers={'Content-Type': 'application/json'},
                 method='POST'
             )
-            with urllib.request.urlopen(req, timeout=5) as resp:
+
+            # ✅ SOLUCIÓN SSL
+            import ssl
+            import certifi
+            context = ssl.create_default_context(cafile=certifi.where())
+
+            with urllib.request.urlopen(req, timeout=5, context=context) as resp:
                 result = json.loads(resp.read())
                 if not result.get('ok'):
                     logger.warning(f"Telegram API error: {result}")
+
         except Exception as e:
             logger.warning(f"No se pudo enviar alerta Telegram: {e}")
 

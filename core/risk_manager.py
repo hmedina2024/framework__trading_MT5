@@ -22,12 +22,8 @@ class RiskManager:
         account_info = self.connector.get_account_info()
         self.balance_at_start = account_info.balance if account_info else None
         self._daily_loss_alerted = False
-        # Cooldown por simbolo: cuando MT5 cierra por SL/TP el bot no lo detecta
-        # de inmediato. Este dict bloquea re-entradas por SYMBOL_REENTRY_COOLDOWN segundos
-        # después de que desaparece una posición que existía antes.
-        self._symbol_last_closed: dict = {}   # {symbol: datetime_de_cierre}
-        SYMBOL_REENTRY_COOLDOWN_SECS = 120    # 2 min de espera tras cierre por SL/TP
-        self._reentry_cooldown = SYMBOL_REENTRY_COOLDOWN_SECS
+        self._symbol_last_closed: dict = {}
+        self._reentry_cooldown = 120  # segundos de cooldown post SL/TP
         logger.info(
             f"RiskManager inicializado | "
             f"Riesgo por trade: {self.max_risk_per_trade*100}% | "
@@ -68,59 +64,42 @@ class RiskManager:
     def _check_max_positions_per_symbol(self, symbol: str) -> bool:
         """
         Verifica que no haya posicion abierta en el simbolo (limite global).
-        Tambien aplica un cooldown de 2 minutos tras un cierre por SL/TP de MT5:
-        cuando MT5 cierra una posicion directamente el bot no lo detecta hasta
-        el siguiente ciclo de 60s — sin este cooldown volvería a abrir inmediatamente.
+        Aplica cooldown de 2 min tras cierre por SL/TP para evitar re-entradas
+        inmediatas antes de que el bot detecte el cierre.
         """
         try:
             positions = self.connector.get_positions(symbol)
             now = datetime.now()
 
             if positions and len(positions) > 0:
-                # Hay posicion abierta — bloquear y registrar que existe
                 logger.warning(
                     f"Posicion global bloqueada para {symbol}: "
-                    f"ya hay {len(positions)} posicion(es) abiertas "
-                    f"(independiente del bot que las abrio)"
+                    f"ya hay {len(positions)} posicion(es) abiertas"
                 )
                 return False
 
-            # No hay posicion abierta — verificar cooldown post-cierre
+            # Cooldown post-cierre
             last_closed = self._symbol_last_closed.get(symbol)
             if last_closed:
                 elapsed = (now - last_closed).total_seconds()
                 if elapsed < self._reentry_cooldown:
                     remaining = int(self._reentry_cooldown - elapsed)
                     logger.info(
-                        f"{symbol}: cooldown post-SL/TP activo — "
-                        f"re-entrada bloqueada {remaining}s mas "
-                        f"(evita re-entrada inmediata tras cierre por MT5)"
+                        f"{symbol}: cooldown post-SL/TP — "
+                        f"re-entrada bloqueada {remaining}s"
                     )
                     return False
                 else:
-                    # Cooldown expirado — limpiar
                     del self._symbol_last_closed[symbol]
-
-            # Registrar que no hay posicion ahora (posible cierre reciente por SL/TP)
-            # Solo registrar si habia posicion en la llamada anterior
-            # Esto lo hace el bot via notify_position_closed()
             return True
-
         except Exception as e:
             logger.error(f"Error al verificar posiciones por simbolo: {e}")
             return True
 
     def notify_position_closed(self, symbol: str) -> None:
-        """
-        Llamar cuando un bot detecta que una posicion fue cerrada (por SL, TP o manual).
-        Activa el cooldown de re-entrada para el simbolo durante _reentry_cooldown segundos.
-        Esto previene que el bot vuelva a abrir inmediatamente tras un cierre por MT5.
-        """
+        """Activa cooldown de re-entrada cuando se cierra una posicion."""
         self._symbol_last_closed[symbol] = datetime.now()
-        logger.info(
-            f"{symbol}: cooldown post-cierre activado "
-            f"({self._reentry_cooldown}s) — re-entrada bloqueada"
-        )
+        logger.info(f"{symbol}: cooldown post-cierre activado ({self._reentry_cooldown}s)")
 
     def _check_margin_available(self, account_info: AccountInfo, request: TradeRequest) -> bool:
         symbol_info = self.connector.get_symbol_info(request.symbol)
