@@ -1,74 +1,106 @@
 [
   {
-    "strategy_type": "BOLLINGER",
-    "symbol": "EURUSD"
+    "strategy_type": "BREAKOUT",
+    "symbol": "BTCUSD"
+  },
+  {
+    "strategy_type": "EMA_CROSS",
+    "symbol": "BTCUSD"
   },
   {
     "strategy_type": "MACD",
-    "symbol": "EURUSD"
+    "symbol": "BTCUSD"
   },
   {
-    "strategy_type": "BOLLINGER",
-    "symbol": "GBPUSD"
+    "strategy_type": "SUPERTREND",
+    "symbol": "BTCUSD"
   },
   {
     "strategy_type": "BREAKOUT",
-    "symbol": "GBPUSD"
+    "symbol": "AUDUSD"
   },
   {
-    "strategy_type": "SUPERTREND",
-    "symbol": "USDJPY"
-  },
-  {
-    "strategy_type": "SUPERTREND",
-    "symbol": "XAUUSD"
+    "strategy_type": "EMA_CROSS",
+    "symbol": "AUDUSD"
   },
   {
     "strategy_type": "MACD",
-    "symbol": "XAUUSD"
-  },
-  {
-    "strategy_type": "BREAKOUT",
-    "symbol": "XAUUSD"
-  },
-  {
-    "strategy_type": "BOLLINGER",
     "symbol": "AUDUSD"
   },
   {
     "strategy_type": "SUPERTREND",
-    "symbol": "USDCAD"
+    "symbol": "AUDUSD"
   },
   {
-    "strategy_type": "BREAKOUT",
+    "strategy_type": "BOLLINGER",
     "symbol": "US30"
   },
   {
-    "strategy_type": "EMA_CROSS",
-    "symbol": "EURUSD"
+    "strategy_type": "WILLIAMS_R",
+    "symbol": "US30"
+  },
+  {
+    "strategy_type": "BREAKOUT",
+    "symbol": "GBPUSD"
   },
   {
     "strategy_type": "EMA_CROSS",
     "symbol": "GBPUSD"
   },
   {
+    "strategy_type": "MACD",
+    "symbol": "GBPUSD"
+  },
+  {
+    "strategy_type": "SUPERTREND",
+    "symbol": "GBPUSD"
+  },
+  {
+    "strategy_type": "BREAKOUT",
+    "symbol": "XAUUSD"
+  },
+  {
     "strategy_type": "EMA_CROSS",
+    "symbol": "XAUUSD"
+  },
+  {
+    "strategy_type": "MACD",
+    "symbol": "XAUUSD"
+  },
+  {
+    "strategy_type": "SUPERTREND",
+    "symbol": "XAUUSD"
+  },
+  {
+    "strategy_type": "BREAKOUT",
+    "symbol": "USDCAD"
+  },
+  {
+    "strategy_type": "EMA_CROSS",
+    "symbol": "USDCAD"
+  },
+  {
+    "strategy_type": "MACD",
+    "symbol": "USDCAD"
+  },
+  {
+    "strategy_type": "SUPERTREND",
+    "symbol": "USDCAD"
+  },
+  {
+    "strategy_type": "BOLLINGER",
+    "symbol": "EURUSD"
+  },
+  {
+    "strategy_type": "WILLIAMS_R",
+    "symbol": "EURUSD"
+  },
+  {
+    "strategy_type": "BOLLINGER",
     "symbol": "USDJPY"
   },
   {
     "strategy_type": "WILLIAMS_R",
-    "symbol": "AUDUSD"
-  },
-  {
-    "strategy_type": "WILLIAMS_R",
-    "symbol": "USDCAD"
-  },
-  {
-    "strategy_type": "EMA_CROSS",
-    "symbol": "USDCAD"
-  },
-  {
-    "strategy_type": "BREAKOUT",
-    "symbol": "BTCUSD"
+    "symbol": "USDJPY"
   }
 ]

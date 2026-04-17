@@ -41,41 +41,24 @@ async def stop_strategy(strategy_id: str, service: TradingService = Depends(get_
         raise HTTPException(status_code=404, detail="Estrategia no encontrada")
     return {"status": "stopped", "id": strategy_id}
 
-@router.post("/backtest")
-async def run_backtest(
-    symbol: str,
-    strategy_type: str = "MACD",
-    days: int = 90,
-    initial_balance: float = 1000.0,
-    risk_pct: float = 0.01,
-    service: TradingService = Depends(get_trading_service)
-):
+@router.get("/regime")
+async def get_regime_status(service: TradingService = Depends(get_trading_service)):
     """
-    Ejecuta un backtest de la estrategia sobre datos históricos de MT5.
-    No abre posiciones reales — simulación completa walk-forward.
+    Retorna el régimen de mercado actual para todos los símbolos.
+    Incluye: régimen (TRENDING_UP/DOWN, RANGING, VOLATILE),
+    ADX, pendiente EMA200, ratio ATR y estrategias recomendadas.
+    """
+    return service.get_regime_status()
 
-    Params:
-      symbol:          par a testear (EURUSD, XAUUSD, etc.)
-      strategy_type:   tipo de estrategia (MACD, BOLLINGER, EMA_CROSS, etc.)
-      days:            días de historial a usar (30-365)
-      initial_balance: balance inicial de simulación (default 1000)
-      risk_pct:        riesgo por trade como decimal (0.01 = 1%)
+@router.post("/regime/refresh")
+async def force_regime_refresh(service: TradingService = Depends(get_trading_service)):
+    """
+    Fuerza una re-evaluación inmediata de todos los regímenes.
+    Inicia/detiene bots según el régimen detectado.
     """
     if not service.is_connected():
         raise HTTPException(status_code=503, detail="MT5 no conectado")
-
-    if days < 10 or days > 365:
-        raise HTTPException(status_code=400, detail="days debe estar entre 10 y 365")
-
-    result = service.run_backtest(
-        symbol=symbol.upper(),
-        strategy_type=strategy_type.upper(),
-        days=days,
-        initial_balance=initial_balance,
-        risk_pct=risk_pct
-    )
-
-    if 'error' in result:
-        raise HTTPException(status_code=400, detail=result['error'])
-
+    import asyncio
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, service.force_regime_update)
     return result

@@ -17,6 +17,7 @@ from strategies.ema_crossover_strategy import EMACrossoverStrategy
 from strategies.williams_r_strategy import WilliamsRStrategy
 from models import TradeRequest, TradeResult, OrderType
 from utils import get_logger
+from core.regime_detector import RegimeDetector
 import asyncio
 import json
 from pathlib import Path
@@ -52,6 +53,7 @@ class TradingService:
         self.risk_manager = None
         self.market_analyzer = None
         self.active_strategies: Dict[str, StrategyBase] = {}
+        self.regime_detector: Optional[RegimeDetector] = None
         self._initialized = True
         
     async def initialize(self) -> bool:
@@ -65,6 +67,11 @@ class TradingService:
                 self.order_manager = OrderManager(self.connector)
                 self.risk_manager = RiskManager(self.connector)
                 self.market_analyzer = MarketAnalyzer(self.connector)
+                # Inicializar detector de régimen de mercado
+                self.regime_detector = RegimeDetector(
+                    market_analyzer=self.market_analyzer,
+                    trading_service=self
+                )
                 logger.info("TradingService inicializado correctamente")
                 return True
             return False
@@ -80,6 +87,10 @@ class TradingService:
         
     async def shutdown(self):
         """Cierra conexiones y detiene estrategias"""
+        # Detener scheduler de régimen
+        if self.regime_detector:
+            self.regime_detector.stop_scheduler()
+
         # Detener todas las estrategias
         for name, strategy in self.active_strategies.items():
             strategy.stop()
@@ -574,6 +585,20 @@ class TradingService:
             return True
         return False
         
+    def get_regime_status(self) -> Dict:
+        """Retorna el estado actual de regímenes de mercado."""
+        if not self.regime_detector:
+            return {}
+        return self.regime_detector.get_all_regimes()
+
+    def force_regime_update(self) -> Dict:
+        """Fuerza una re-evaluación inmediata de todos los regímenes."""
+        if not self.regime_detector:
+            return {}
+        regimes = self.regime_detector.detect_all_regimes()
+        changes = self.regime_detector.apply_regimes()
+        return {'regimes': regimes, 'changes': changes}
+
     def get_strategies_status(self) -> List[Dict]:
         return [
             {

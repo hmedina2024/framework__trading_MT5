@@ -46,6 +46,16 @@ async def lifespan(app: FastAPI):
         # Alerta Telegram de arranque
         if _TELEGRAM_OK:
             alert_server_start(launched)
+
+        # Iniciar scheduler de régimen de mercado
+        # Detecta el régimen (tendencia/lateral/volátil) y activa/desactiva
+        # bots automáticamente cada 4 horas y al abrir Londres (07:00 UTC)
+        if trading_service.regime_detector:
+            await loop.run_in_executor(
+                None,
+                trading_service.regime_detector.start_scheduler
+            )
+            logger.info("📈 RegimeDetector scheduler iniciado")
     else:
         logger.warning("⚠️ Servicio de trading no pudo conectar a MT5 al inicio")
     
