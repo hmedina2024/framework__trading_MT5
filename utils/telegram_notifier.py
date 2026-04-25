@@ -116,12 +116,18 @@ def alert_trade_opened(strategy: str, symbol: str, direction: str,
 def alert_trade_closed(strategy: str, symbol: str, direction: str,
                        profit: float, reason: str = '') -> None:
     """Alerta cuando se cierra una posición con su resultado."""
-    if profit >= 0:
-        emoji = '✅'
+    # Distinguir tres casos: ganancia, pérdida, o datos no disponibles aún
+    if profit > 0.001:
+        emoji  = '✅'
         result = f"+${profit:.2f}"
-    else:
-        emoji = '❌'
+    elif profit < -0.001:
+        emoji  = '❌'
         result = f"-${abs(profit):.2f}"
+    else:
+        # profit == 0 puede significar que el deal aún no está en el historial
+        # o que realmente fue breakeven — mostrar como pendiente
+        emoji  = '⏳'
+        result = "dato pendiente (breakeven o historial aún no disponible)"
 
     now = datetime.now().strftime('%H:%M')
     reason_line = f"\n📝 Razón: {reason}" if reason else ''

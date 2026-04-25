@@ -6,7 +6,8 @@
 // Bug fix: leer la URL en el momento de cada petición, no al cargar la página.
 // Así funciona correctamente tanto en localhost como en EC2 sin F5 adicional.
 function getApiBase() {
-    return localStorage.getItem('apiUrl') || 'http://localhost:8000/api/v1';
+    return localStorage.getItem('apiUrl') ||
+        `${window.location.protocol}//${window.location.hostname}:8000/api/v1`;
 }
 
 // ============ HTTP CLIENT ============

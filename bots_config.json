@@ -1,106 +1,122 @@
 [
   {
     "strategy_type": "BREAKOUT",
-    "symbol": "BTCUSD"
-  },
-  {
-    "strategy_type": "EMA_CROSS",
-    "symbol": "BTCUSD"
-  },
-  {
-    "strategy_type": "MACD",
-    "symbol": "BTCUSD"
+    "symbol": "EURUSD"
   },
   {
     "strategy_type": "SUPERTREND",
-    "symbol": "BTCUSD"
+    "symbol": "EURUSD"
+  },
+  {
+    "strategy_type": "MACD",
+    "symbol": "EURUSD"
+  },
+  {
+    "strategy_type": "EMA_CROSS",
+    "symbol": "EURUSD"
   },
   {
     "strategy_type": "BREAKOUT",
-    "symbol": "AUDUSD"
-  },
-  {
-    "strategy_type": "EMA_CROSS",
-    "symbol": "AUDUSD"
-  },
-  {
-    "strategy_type": "MACD",
-    "symbol": "AUDUSD"
+    "symbol": "BTCUSD"
   },
   {
     "strategy_type": "SUPERTREND",
-    "symbol": "AUDUSD"
+    "symbol": "BTCUSD"
   },
   {
-    "strategy_type": "BOLLINGER",
-    "symbol": "US30"
+    "strategy_type": "MACD",
+    "symbol": "BTCUSD"
+  },
+  {
+    "strategy_type": "EMA_CROSS",
+    "symbol": "BTCUSD"
   },
   {
     "strategy_type": "WILLIAMS_R",
     "symbol": "US30"
   },
   {
-    "strategy_type": "BREAKOUT",
-    "symbol": "GBPUSD"
-  },
-  {
-    "strategy_type": "EMA_CROSS",
-    "symbol": "GBPUSD"
-  },
-  {
-    "strategy_type": "MACD",
-    "symbol": "GBPUSD"
-  },
-  {
-    "strategy_type": "SUPERTREND",
-    "symbol": "GBPUSD"
-  },
-  {
-    "strategy_type": "BREAKOUT",
-    "symbol": "XAUUSD"
-  },
-  {
-    "strategy_type": "EMA_CROSS",
-    "symbol": "XAUUSD"
-  },
-  {
-    "strategy_type": "MACD",
-    "symbol": "XAUUSD"
-  },
-  {
-    "strategy_type": "SUPERTREND",
-    "symbol": "XAUUSD"
-  },
-  {
-    "strategy_type": "BREAKOUT",
-    "symbol": "USDCAD"
-  },
-  {
-    "strategy_type": "EMA_CROSS",
-    "symbol": "USDCAD"
-  },
-  {
-    "strategy_type": "MACD",
-    "symbol": "USDCAD"
-  },
-  {
-    "strategy_type": "SUPERTREND",
-    "symbol": "USDCAD"
-  },
-  {
     "strategy_type": "BOLLINGER",
-    "symbol": "EURUSD"
+    "symbol": "US30"
   },
   {
-    "strategy_type": "WILLIAMS_R",
-    "symbol": "EURUSD"
+    "strategy_type": "MACD",
+    "symbol": "GBPUSD"
   },
   {
-    "strategy_type": "BOLLINGER",
+    "strategy_type": "SUPERTREND",
+    "symbol": "GBPUSD"
+  },
+  {
+    "strategy_type": "EMA_CROSS",
+    "symbol": "GBPUSD"
+  },
+  {
+    "strategy_type": "BREAKOUT",
+    "symbol": "GBPUSD"
+  },
+  {
+    "strategy_type": "MACD",
     "symbol": "USDJPY"
   },
   {
-    "strategy_type": "WILLIAMS_R",
+    "strategy_type": "SUPERTREND",
     "symbol": "USDJPY"
+  },
+  {
+    "strategy_type": "EMA_CROSS",
+    "symbol": "USDJPY"
+  },
+  {
+    "strategy_type": "BREAKOUT",
+    "symbol": "USDJPY"
+  },
+  {
+    "strategy_type": "MACD",
+    "symbol": "XAUUSD"
+  },
+  {
+    "strategy_type": "SUPERTREND",
+    "symbol": "XAUUSD"
+  },
+  {
+    "strategy_type": "EMA_CROSS",
+    "symbol": "XAUUSD"
+  },
+  {
+    "strategy_type": "BREAKOUT",
+    "symbol": "XAUUSD"
+  },
+  {
+    "strategy_type": "MACD",
+    "symbol": "AUDUSD"
+  },
+  {
+    "strategy_type": "SUPERTREND",
+    "symbol": "AUDUSD"
+  },
+  {
+    "strategy_type": "EMA_CROSS",
+    "symbol": "AUDUSD"
+  },
+  {
+    "strategy_type": "BREAKOUT",
+    "symbol": "AUDUSD"
+  },
+  {
+    "strategy_type": "MACD",
+    "symbol": "USDCAD"
+  },
+  {
+    "strategy_type": "SUPERTREND",
+    "symbol": "USDCAD"
+  },
+  {
+    "strategy_type": "EMA_CROSS",
+    "symbol": "USDCAD"
+  },
+  {
+    "strategy_type": "BREAKOUT",
+    "symbol": "USDCAD"
   }
 ]

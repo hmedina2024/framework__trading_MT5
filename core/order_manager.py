@@ -138,7 +138,8 @@ class OrderManager:
                 "price": request.price,
                 "deviation": request.deviation,
                 "magic": request.magic_number,
-                "comment": str(request.comment)[:31] if request.comment else "",
+                "comment": ''.join(c for c in str(request.comment or '')
+                               if c.isalnum() or c in (' ', '_', '-'))[:31],
                 "type_time": mt5.ORDER_TIME_GTC,
                 "type_filling": mt5.ORDER_FILLING_IOC,
             }
@@ -150,9 +151,20 @@ class OrderManager:
             if request.take_profit:
                 mt5_request["tp"] = request.take_profit
             
-            # Enviar orden
+            # Enviar orden — intentar con IOC primero, luego FOK, luego RETURN
             result = mt5.order_send(mt5_request)
-            
+
+            # Si falla por filling, intentar con modo alternativo
+            if result is not None and result.retcode in (10014, 10015, 10016):
+                logger.info(f"Filling IOC rechazado (retcode={result.retcode}), intentando FOK...")
+                mt5_request["type_filling"] = mt5.ORDER_FILLING_FOK
+                result = mt5.order_send(mt5_request)
+
+            if result is not None and result.retcode in (10014, 10015, 10016):
+                logger.info(f"Filling FOK rechazado, intentando RETURN...")
+                mt5_request["type_filling"] = mt5.ORDER_FILLING_RETURN
+                result = mt5.order_send(mt5_request)
+
             if result is None:
                 error = mt5.last_error()
                 logger.error(f"Error al enviar orden: {error}")
@@ -161,7 +173,7 @@ class OrderManager:
                     error_code=error[0] if error else None,
                     error_message=str(error)
                 )
-            
+
             # Procesar resultado
             if result.retcode == mt5.TRADE_RETCODE_DONE:
                 logger.info(f"✅ Posición abierta exitosamente. Ticket: {result.order}")
@@ -250,7 +262,7 @@ class OrderManager:
                 "price": close_price,
                 "deviation": deviation if deviation else settings.DEFAULT_DEVIATION,
                 "magic": pos.magic,
-                "comment": "Cierre de posición",
+                "comment": "Cierre",
                 "type_time": mt5.ORDER_TIME_GTC,
                 "type_filling": mt5.ORDER_FILLING_IOC,
             }

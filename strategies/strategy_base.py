@@ -800,19 +800,46 @@ class StrategyBase(ABC):
                     try:
                         import MetaTrader5 as mt5
                         from datetime import timedelta
-                        now = datetime.now()
-                        deals = mt5.history_deals_get(
-                            now - timedelta(minutes=15), now
-                        )
+
+                        # Buscar el deal de cierre por position_id (= ticket de la posicion)
+                        # Mas fiable que buscar por simbolo porque MT5 puede usar
+                        # distintas variantes del nombre del simbolo en el historial
                         profit = 0.0
                         reason = 'SL/TP'
-                        if deals:
+
+                        # Intentar hasta 3 veces con espera — MT5 puede tardar en registrar
+                        for attempt in range(3):
+                            if attempt > 0:
+                                import time as _time
+                                _time.sleep(1)
+
+                            now = datetime.now()
+                            deals = mt5.history_deals_get(
+                                now - timedelta(minutes=30), now
+                            )
+                            if not deals:
+                                continue
+
+                            # Buscar por position_id que coincide con el ticket de la posicion
                             for d in reversed(deals):
-                                if d.symbol == symbol and d.entry == 1:
-                                    profit = d.profit + getattr(d, 'commission', 0) + getattr(d, 'swap', 0)
+                                if d.position_id == ticket and d.entry == 1:
+                                    profit = (d.profit or 0.0) + (d.commission or 0.0) + (d.swap or 0.0)
                                     comment = (d.comment or '').lower()
-                                    reason = 'TP' if 'tp' in comment else 'SL'
+                                    if 'tp' in comment:
+                                        reason = 'TP'
+                                    elif 'sl' in comment or 'stop' in comment:
+                                        reason = 'SL'
+                                    else:
+                                        reason = 'TP' if profit >= 0 else 'SL'
                                     break
+
+                            if profit != 0.0:
+                                break  # encontrado — salir del loop de reintentos
+
+                        logger.info(
+                            f"Cierre MT5 {symbol} ticket={ticket}: "
+                            f"profit={profit:.2f}, reason={reason}"
+                        )
                         alert_trade_closed(
                             strategy  = self.name,
                             symbol    = symbol,
