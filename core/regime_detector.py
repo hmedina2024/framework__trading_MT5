@@ -26,20 +26,31 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-ADX_TREND_THRESHOLD   = 25.0
-ADX_RANGE_THRESHOLD   = 20.0
+ADX_TREND_THRESHOLD   = 22.0  # bajado de 25 — detecta tendencias antes
+ADX_RANGE_THRESHOLD   = 18.0  # bajado de 20 — más selectivo para RANGING
 ATR_VOLATILE_RATIO    = 2.0
 EMA_SLOPE_PERIODS     = 10
 REGIME_UPDATE_HOURS   = 4
 REGIME_UPDATE_AT_OPEN = True
 
+# Estrategias por régimen — máximo 2 por símbolo basado en datos reales.
+# EMA_CROSS y MACD son las únicas consistentemente rentables en tendencia.
+# Supertrend y Breakout generan 0 trades en H1 — reservados para H4/D1.
+# En RANGING solo WILLIAMS_R porque Bollinger tiene WR < 25% en mercado actual.
 STRATEGIES_BY_REGIME = {
-    'TRENDING_UP':   ['EMA_CROSS', 'MACD', 'SUPERTREND', 'BREAKOUT'],
-    'TRENDING_DOWN': ['EMA_CROSS', 'MACD', 'SUPERTREND', 'BREAKOUT'],
-    'RANGING':       ['BOLLINGER', 'WILLIAMS_R'],
-    'VOLATILE':      [],
-    'UNKNOWN':       ['EMA_CROSS', 'MACD'],
+    'TRENDING_UP':   ['EMA_CROSS', 'MACD'],
+    'TRENDING_DOWN': ['EMA_CROSS', 'MACD'],
+    'RANGING':       ['WILLIAMS_R'],   # Bollinger desactivado hasta WR > 40%
+    'VOLATILE':      [],               # sin operaciones en volatilidad extrema
+    'UNKNOWN':       ['EMA_CROSS'],    # solo la mejor estrategia como fallback
 }
+
+# Estrategias adicionales disponibles pero desactivadas por bajo rendimiento.
+# Reactivar cuando los datos muestren mejora sostenida (mínimo 15 trades):
+#   SUPERTREND  → 0 trades generados en H1, funciona mejor en H4
+#   BREAKOUT    → 0 trades en H1, diseñado para H4 (ya configurado en SYMBOL_CONFIG)
+#   BOLLINGER   → WR < 25% en entorno tendencial actual
+STRATEGIES_INACTIVE = ['SUPERTREND', 'BREAKOUT', 'BOLLINGER']
 
 SYMBOL_CONFIG = {
     'EURUSD': {'timeframe': mt5.TIMEFRAME_H1,  'atr_period': 14},
@@ -50,6 +61,20 @@ SYMBOL_CONFIG = {
     'USDCAD': {'timeframe': mt5.TIMEFRAME_H1,  'atr_period': 14},
     'US30':   {'timeframe': mt5.TIMEFRAME_H4,  'atr_period': 14},
     'BTCUSD': {'timeframe': mt5.TIMEFRAME_H4,  'atr_period': 14},
+}
+
+# Estrategias preferidas por símbolo basadas en WR histórico real.
+# Cuando el régimen detector inicia bots, prioriza estas estrategias.
+# Si la estrategia preferida ya está activa, no inicia la segunda.
+SYMBOL_PREFERRED_STRATEGY = {
+    'EURUSD': 'EMA_CROSS',   # 60% WR histórico
+    'GBPUSD': 'EMA_CROSS',   # 50% WR histórico
+    'USDJPY': 'EMA_CROSS',   # rendimiento estable
+    'XAUUSD': 'MACD',        # 62.5% WR histórico
+    'AUDUSD': 'EMA_CROSS',   # 100% WR (1 trade — confirmar con más datos)
+    'USDCAD': 'EMA_CROSS',   # 71.4% WR — mejor estrategia del sistema
+    'US30':   'MACD',        # tendencia clara
+    'BTCUSD': 'MACD',        # 75% WR histórico
 }
 
 
@@ -162,11 +187,13 @@ class RegimeDetector:
     def apply_regimes(self) -> Dict[str, List[str]]:
         """
         Inicia y detiene bots según el régimen actual de cada símbolo.
-        Solo actúa sobre símbolos que ya tienen al menos un bot activo
-        o que están en SYMBOL_CONFIG. No fuerza el inicio de todos los bots —
-        respeta el bots_config.json como fuente de verdad de qué estaba activo.
+        Máximo 2 bots por símbolo. Prioriza las estrategias con mejor
+        historial definidas en SYMBOL_PREFERRED_STRATEGY.
+        Detiene automáticamente estrategias inactivas (SUPERTREND, BREAKOUT)
+        que no generan trades en H1.
         """
         changes = {'started': [], 'stopped': []}
+        MAX_BOTS_PER_SYMBOL = 2
 
         for symbol, regime_data in self._regimes.items():
             regime           = regime_data.get('regime', 'UNKNOWN')
@@ -174,27 +201,62 @@ class RegimeDetector:
             active_map       = self._get_active_by_symbol(symbol)
             active_types     = set(active_map.values())
 
-            # Solo detener estrategias que NO son apropiadas para el régimen actual
+            # Detener estrategias inactivas (Supertrend, Breakout, Bollinger)
+            # que no generan trades en el entorno actual
+            for s_type in list(active_types):
+                if s_type in STRATEGIES_INACTIVE:
+                    s_id = f"{s_type}_{symbol}"
+                    if self.trading_service.stop_strategy(s_id):
+                        changes['stopped'].append(s_id)
+                        active_types.discard(s_type)
+                        logger.info(
+                            f"Régimen: detenido {s_id} "
+                            f"(estrategia inactiva — 0 trades en H1)"
+                        )
+
+            # Detener estrategias no aptas para el régimen actual
             to_stop = active_types - ideal_strategies
             for s_type in to_stop:
                 s_id = f"{s_type}_{symbol}"
                 if self.trading_service.stop_strategy(s_id):
                     changes['stopped'].append(s_id)
-                    logger.info(f"Régimen {regime}: detenido {s_id} (no apto para régimen)")
+                    active_types.discard(s_type)
+                    logger.info(
+                        f"Régimen {regime}: detenido {s_id} "
+                        f"(no apto para régimen actual)"
+                    )
 
-            # Iniciar estrategias apropiadas SOLO si ya había algún bot activo en ese símbolo
-            # (evita activar bots en símbolos que el usuario decidió no usar)
-            if active_types:
-                to_start = ideal_strategies - active_types
-                for s_type in to_start:
-                    if self.trading_service.start_strategy(symbol, s_type):
-                        changes['started'].append(f"{s_type}_{symbol}")
-                        logger.info(f"Régimen {regime}: iniciado {s_type} en {symbol}")
+            # Iniciar estrategias solo si había bots activos y hay espacio
+            if active_types or len(active_map) > 0:
+                # Ordenar por preferencia del símbolo
+                preferred = SYMBOL_PREFERRED_STRATEGY.get(symbol)
+                ordered_strategies = []
+                if preferred and preferred in ideal_strategies:
+                    ordered_strategies.append(preferred)
+                for s in ideal_strategies:
+                    if s not in ordered_strategies:
+                        ordered_strategies.append(s)
 
-        if changes['started'] or changes['stopped']:
+                # Solo iniciar hasta llegar al máximo de bots por símbolo
+                current_active = set(self._get_active_by_symbol(symbol).values())
+                for s_type in ordered_strategies:
+                    if len(current_active) >= MAX_BOTS_PER_SYMBOL:
+                        break
+                    if s_type not in current_active:
+                        if self.trading_service.start_strategy(symbol, s_type):
+                            changes['started'].append(f"{s_type}_{symbol}")
+                            current_active.add(s_type)
+                            logger.info(
+                                f"Régimen {regime}: iniciado {s_type} en {symbol} "
+                                f"({len(current_active)}/{MAX_BOTS_PER_SYMBOL})"
+                            )
+
+        total = len(changes['started']) + len(changes['stopped'])
+        if total > 0:
             logger.info(
-                f"Cambios de régimen aplicados: "
-                f"{len(changes['started'])} iniciados, {len(changes['stopped'])} detenidos"
+                f"Cambios de régimen: {len(changes['started'])} iniciados, "
+                f"{len(changes['stopped'])} detenidos — "
+                f"máx {MAX_BOTS_PER_SYMBOL} bots/símbolo"
             )
         return changes
 

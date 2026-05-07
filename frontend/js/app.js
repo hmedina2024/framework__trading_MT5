@@ -207,9 +207,20 @@ async function loadAccountInfo() {
         document.getElementById('marginFree').textContent = formatCurrency(account.margin_free, account.currency);
         document.getElementById('accountLogin').textContent = account.login;
 
-        // Color del profit
+        // Color del profit — azul MT5 para positivo, rojo para negativo
         const profitEl = document.getElementById('profit');
-        profitEl.style.color = account.profit >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
+        if (account.profit > 0) {
+            profitEl.style.color = '#378ADD';
+            profitEl.style.fontWeight = '700';
+            profitEl.textContent = '+$' + account.profit.toFixed(2);
+        } else if (account.profit < 0) {
+            profitEl.style.color = '#E24B4A';
+            profitEl.style.fontWeight = '700';
+            profitEl.textContent = '-$' + Math.abs(account.profit).toFixed(2);
+        } else {
+            profitEl.style.color = 'var(--color-text-secondary)';
+            profitEl.style.fontWeight = '400';
+        }
     } catch (err) {
         console.warn('No se pudo cargar info de cuenta:', err.message);
     }
@@ -226,22 +237,38 @@ async function loadPositions() {
             return;
         }
 
-        tbody.innerHTML = positions.map(pos => `
-            <tr>
+        tbody.innerHTML = positions.map(pos => {
+            const isPositive  = pos.profit > 0;
+            const isNegative  = pos.profit < 0;
+            const pnlColor    = isPositive ? '#378ADD' : isNegative ? '#E24B4A' : 'var(--color-text-secondary)';
+            const pnlArrow    = isPositive ? '▲' : isNegative ? '▼' : '●';
+            const pnlSign     = isPositive ? '+' : '';
+            const typeColor   = pos.type === 'BUY' ? '#378ADD' : '#E24B4A';
+            const priceDiff   = pos.type === 'BUY'
+                ? (pos.price_current - pos.price_open)
+                : (pos.price_open - pos.price_current);
+            const pips        = (priceDiff / (pos.symbol.includes('JPY') ? 0.01 : 0.0001)).toFixed(1);
+            const pipsColor   = priceDiff >= 0 ? '#378ADD' : '#E24B4A';
+
+            return `
+            <tr style="transition: background 0.3s">
                 <td><strong>${pos.symbol}</strong></td>
-                <td class="type-${pos.type.toLowerCase()}">${pos.type}</td>
+                <td style="color:${typeColor};font-weight:600">${pos.type}</td>
                 <td>${pos.volume}</td>
-                <td>${pos.price_open}</td>
-                <td class="${pos.profit >= 0 ? 'profit-positive' : 'profit-negative'}">
-                    ${formatCurrency(pos.profit)}
+                <td style="font-size:12px">${pos.price_open}</td>
+                <td style="color:${pnlColor};font-weight:600;font-size:14px">
+                    ${pnlArrow} ${pnlSign}$${Math.abs(pos.profit).toFixed(2)}
+                    <div style="font-size:10px;color:${pipsColor};font-weight:400">
+                        ${priceDiff >= 0 ? '+' : ''}${pips} pips
+                    </div>
                 </td>
                 <td>
                     <button class="btn-icon" onclick="closePosition(${pos.ticket})" title="Cerrar posición">
                         <i class="fas fa-times"></i>
                     </button>
                 </td>
-            </tr>
-        `).join('');
+            </tr>`;
+        }).join('');
     } catch (err) {
         console.warn('No se pudo cargar posiciones:', err.message);
     }
@@ -790,26 +817,58 @@ async function loadAllPositions() {
             return;
         }
 
-        tbody.innerHTML = positions.map(pos => `
+        tbody.innerHTML = positions.map(pos => {
+            const isPositive = pos.profit > 0;
+            const isNegative = pos.profit < 0;
+            const pnlColor   = isPositive ? '#378ADD' : isNegative ? '#E24B4A' : 'var(--color-text-secondary)';
+            const pnlBg      = isPositive ? 'rgba(55,138,221,0.08)' : isNegative ? 'rgba(226,75,74,0.08)' : 'transparent';
+            const pnlArrow   = isPositive ? '▲' : isNegative ? '▼' : '●';
+            const pnlSign    = isPositive ? '+' : '';
+            const typeColor  = pos.type === 'BUY' ? '#378ADD' : '#E24B4A';
+            const typeBg     = pos.type === 'BUY' ? 'rgba(55,138,221,0.12)' : 'rgba(226,75,74,0.12)';
+            const priceDiff  = pos.type === 'BUY'
+                ? (pos.price_current - pos.price_open)
+                : (pos.price_open - pos.price_current);
+            const isJPY      = pos.symbol.includes('JPY');
+            const pipSize    = isJPY ? 0.01 : pos.symbol.includes('XAU') ? 0.1 : 0.0001;
+            const pips       = (priceDiff / pipSize).toFixed(1);
+            const pipsColor  = priceDiff >= 0 ? '#378ADD' : '#E24B4A';
+            const slDist     = pos.stop_loss
+                ? Math.abs(pos.price_current - pos.stop_loss).toFixed(pos.symbol.includes('JPY') ? 2 : 5)
+                : '--';
+            const tpDist     = pos.take_profit
+                ? Math.abs(pos.take_profit - pos.price_current).toFixed(pos.symbol.includes('JPY') ? 2 : 5)
+                : '--';
+
+            return `
             <tr>
-                <td>#${pos.ticket}</td>
+                <td style="font-size:11px;color:var(--color-text-secondary)">#${pos.ticket}</td>
                 <td><strong>${pos.symbol}</strong></td>
-                <td class="type-${pos.type.toLowerCase()}">${pos.type}</td>
+                <td>
+                    <span style="color:${typeColor};background:${typeBg};padding:2px 8px;border-radius:4px;font-weight:600;font-size:12px">
+                        ${pos.type}
+                    </span>
+                </td>
                 <td>${pos.volume}</td>
-                <td>${pos.price_open}</td>
-                <td>${pos.price_current}</td>
-                <td>${pos.stop_loss || '--'}</td>
-                <td>${pos.take_profit || '--'}</td>
-                <td class="${pos.profit >= 0 ? 'profit-positive' : 'profit-negative'}">
-                    ${formatCurrency(pos.profit)}
+                <td style="font-size:12px">${pos.price_open}</td>
+                <td style="font-weight:500">${pos.price_current}
+                    <div style="font-size:10px;color:${pipsColor}">${priceDiff >= 0 ? '+' : ''}${pips} pips</div>
+                </td>
+                <td style="font-size:12px;color:#E24B4A">${pos.stop_loss || '--'}</td>
+                <td style="font-size:12px;color:#378ADD">${pos.take_profit || '--'}</td>
+                <td style="background:${pnlBg};border-radius:6px;padding:4px 8px">
+                    <div style="color:${pnlColor};font-weight:700;font-size:15px">
+                        ${pnlArrow} ${pnlSign}$${Math.abs(pos.profit).toFixed(2)}
+                    </div>
                 </td>
                 <td>
-                    <button class="btn-icon" onclick="closePosition(${pos.ticket})" title="Cerrar">
+                    <button class="btn-icon" onclick="closePosition(${pos.ticket})" title="Cerrar"
+                        style="color:#E24B4A">
                         <i class="fas fa-times"></i>
                     </button>
                 </td>
-            </tr>
-        `).join('');
+            </tr>`;
+        }).join('');
     } catch (err) {
         console.warn('No se pudo cargar posiciones:', err.message);
     }

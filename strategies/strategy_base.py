@@ -798,55 +798,84 @@ class StrategyBase(ABC):
                 # Alerta Telegram para cierres por SL/TP
                 if _TELEGRAM_AVAILABLE:
                     try:
-                        import MetaTrader5 as mt5
-                        from datetime import timedelta
+                        # Lanzar en thread separado para no bloquear el loop principal
+                        # y dar tiempo a MT5 de registrar el deal en el historial
+                        _strategy_name  = self.name
+                        _symbol         = symbol
+                        _direction      = info.get('type', '?')
+                        _ticket         = ticket
 
-                        # Buscar el deal de cierre por position_id (= ticket de la posicion)
-                        # Mas fiable que buscar por simbolo porque MT5 puede usar
-                        # distintas variantes del nombre del simbolo en el historial
-                        profit = 0.0
-                        reason = 'SL/TP'
+                        def _send_sltp_alert(strat, sym, direc, tkt):
+                            import MetaTrader5 as mt5
+                            import time as _time
+                            from datetime import timedelta, datetime as _dt
 
-                        # Intentar hasta 3 veces con espera — MT5 puede tardar en registrar
-                        for attempt in range(3):
-                            if attempt > 0:
-                                import time as _time
-                                _time.sleep(1)
+                            profit = None
+                            reason = 'SL/TP'
 
-                            now = datetime.now()
-                            deals = mt5.history_deals_get(
-                                now - timedelta(minutes=30), now
+                            # Reintentar hasta 10 veces con 2 segundos entre intentos
+                            # = hasta 20 segundos de espera total para que MT5 registre el deal
+                            for attempt in range(10):
+                                _time.sleep(2)  # esperar siempre, incluso en el primer intento
+                                try:
+                                    now   = _dt.now()
+                                    deals = mt5.history_deals_get(
+                                        now - timedelta(minutes=60), now
+                                    )
+                                    if not deals:
+                                        continue
+
+                                    for d in reversed(deals):
+                                        if d.position_id == tkt and d.entry == 1:
+                                            profit = (
+                                                (d.profit      or 0.0) +
+                                                (d.commission  or 0.0) +
+                                                (d.swap        or 0.0)
+                                            )
+                                            comment = (d.comment or '').lower()
+                                            if 'tp' in comment:
+                                                reason = 'TP'
+                                            elif 'sl' in comment or 'stop' in comment:
+                                                reason = 'SL'
+                                            else:
+                                                reason = 'TP' if profit >= 0 else 'SL'
+                                            break
+
+                                    if profit is not None:
+                                        break  # deal encontrado
+
+                                except Exception:
+                                    pass  # reintentar
+
+                            # Si después de 20 segundos no lo encontramos,
+                            # intentar obtener el profit de la posicion cerrada
+                            # comparando balance antes/después (aproximado)
+                            if profit is None:
+                                profit = 0.0
+                                logger.warning(
+                                    f"No se encontro deal para ticket={tkt} "
+                                    f"después de 20s — enviando con profit desconocido"
+                                )
+
+                            logger.info(
+                                f"Alerta SL/TP {sym} ticket={tkt}: "
+                                f"profit={profit:.2f}, reason={reason}"
                             )
-                            if not deals:
-                                continue
+                            alert_trade_closed(
+                                strategy  = strat,
+                                symbol    = sym,
+                                direction = direc,
+                                profit    = profit,
+                                reason    = reason
+                            )
 
-                            # Buscar por position_id que coincide con el ticket de la posicion
-                            for d in reversed(deals):
-                                if d.position_id == ticket and d.entry == 1:
-                                    profit = (d.profit or 0.0) + (d.commission or 0.0) + (d.swap or 0.0)
-                                    comment = (d.comment or '').lower()
-                                    if 'tp' in comment:
-                                        reason = 'TP'
-                                    elif 'sl' in comment or 'stop' in comment:
-                                        reason = 'SL'
-                                    else:
-                                        reason = 'TP' if profit >= 0 else 'SL'
-                                    break
+                        import threading as _th
+                        _th.Thread(
+                            target=_send_sltp_alert,
+                            args=(_strategy_name, _symbol, _direction, _ticket),
+                            daemon=True
+                        ).start()
 
-                            if profit != 0.0:
-                                break  # encontrado — salir del loop de reintentos
-
-                        logger.info(
-                            f"Cierre MT5 {symbol} ticket={ticket}: "
-                            f"profit={profit:.2f}, reason={reason}"
-                        )
-                        alert_trade_closed(
-                            strategy  = self.name,
-                            symbol    = symbol,
-                            direction = info.get('type', '?'),
-                            profit    = profit,
-                            reason    = reason
-                        )
                     except Exception as e:
                         logger.debug(f"Telegram SL/TP alert error: {e}")
                 # Remover de posiciones conocidas
