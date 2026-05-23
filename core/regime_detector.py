@@ -1,20 +1,17 @@
 """
 Clasificador de Régimen de Mercado — Fase 1A del Plan ML
 
-Detecta el régimen actual de cada símbolo y decide qué estrategias
-deben estar activas. Se ejecuta automáticamente cada día a las 07:00 UTC
-(apertura de Londres) y cada 4 horas durante el día.
+5 niveles de régimen basados en la fuerza del ADX:
 
-Regímenes:
-  TRENDING_UP   — tendencia alcista fuerte
-  TRENDING_DOWN — tendencia bajista fuerte
-  RANGING       — mercado lateral
-  VOLATILE      — alta volatilidad sin dirección
+  RANGING_PURE     ADX < 18        → Bollinger + Williams %R + RSI
+  RANGING_MILD     ADX 18-22       → Williams %R + MA_CROSS + RSI
+  TRENDING_MILD    ADX 22-30       → EMA_CROSS + MACD
+  TRENDING_STRONG  ADX 30-45       → EMA_CROSS + MACD + Supertrend
+  TRENDING_EXTREME ADX > 45        → Breakout + Supertrend
+  VOLATILE         ATR > 2x avg    → ninguna
 
-Estrategias por régimen:
-  TRENDING_*  → EMA_CROSS, MACD, SUPERTREND, BREAKOUT
-  RANGING     → BOLLINGER, WILLIAMS_R
-  VOLATILE    → ninguna
+Cada estrategia se activa solo en el contexto donde estadísticamente funciona.
+Se ejecuta cada 4h y a las 07:00 UTC (apertura de Londres).
 """
 import MetaTrader5 as mt5
 import pandas as pd
@@ -26,32 +23,60 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-ADX_TREND_THRESHOLD   = 22.0  # bajado de 25 — detecta tendencias antes
-ADX_RANGE_THRESHOLD   = 18.0  # bajado de 20 — más selectivo para RANGING
-ATR_VOLATILE_RATIO    = 2.0
-EMA_SLOPE_PERIODS     = 10
-REGIME_UPDATE_HOURS   = 4
-REGIME_UPDATE_AT_OPEN = True
+# ---------------------------------------------------------------------------
+# Umbrales de clasificación ADX
+# ---------------------------------------------------------------------------
+ADX_RANGING_PURE     = 15.0   # ADX < 15  → lateral puro (Bollinger+Williams+RSI)
+ADX_RANGING_MILD     = 20.0   # ADX 15-20 → lateral moderado (Williams+MA_CROSS+RSI)
+ADX_TRENDING_MILD    = 25.0   # ADX 20-25 → tendencia moderada (EMA_CROSS+MACD)
+ADX_TRENDING_STRONG  = 40.0   # ADX 25-40 → tendencia fuerte (EMA+MACD+SUPERTREND)
+# ADX > 40 → tendencia extrema (BREAKOUT+SUPERTREND)
+# ADX > 45            → tendencia extrema (Breakout + Supertrend)
 
-# Estrategias por régimen — máximo 2 por símbolo basado en datos reales.
-# EMA_CROSS y MACD son las únicas consistentemente rentables en tendencia.
-# Supertrend y Breakout generan 0 trades en H1 — reservados para H4/D1.
-# En RANGING solo WILLIAMS_R porque Bollinger tiene WR < 25% en mercado actual.
+ATR_VOLATILE_RATIO   = 2.0    # ATR actual > 2x promedio = volátil
+EMA_SLOPE_PERIODS    = 10     # velas para calcular pendiente EMA200
+REGIME_UPDATE_HOURS  = 4      # re-evaluar cada 4 horas
+REGIME_UPDATE_AT_OPEN = True  # evaluar siempre a las 07:00 UTC
+
+# ---------------------------------------------------------------------------
+# Estrategias por nivel de régimen
+# Cada estrategia se activa SOLO en el contexto donde funciona bien.
+# ---------------------------------------------------------------------------
 STRATEGIES_BY_REGIME = {
-    'TRENDING_UP':   ['EMA_CROSS', 'MACD'],
-    'TRENDING_DOWN': ['EMA_CROSS', 'MACD'],
-    'RANGING':       ['WILLIAMS_R'],   # Bollinger desactivado hasta WR > 40%
-    'VOLATILE':      [],               # sin operaciones en volatilidad extrema
-    'UNKNOWN':       ['EMA_CROSS'],    # solo la mejor estrategia como fallback
+    # ADX < 18 — mercado lateral puro, precio oscila en rango estrecho
+    # Bollinger y Williams detectan reversiones, RSI confirma extremos
+    'RANGING_PURE':     ['BOLLINGER', 'WILLIAMS_R', 'RSI'],
+
+    # ADX 18-22 — lateral con ligera direccionalidad
+    # Williams %R más fiable que Bollinger, MA Cross captura mini-tendencias
+    'RANGING_MILD':     ['WILLIAMS_R', 'MA_CROSS', 'RSI'],
+
+    # ADX 22-30 — tendencia moderada, la más común en Forex
+    # EMA Cross y MACD son los más rentables en este rango (WR 60-75%)
+    'TRENDING_MILD':    ['EMA_CROSS', 'MACD'],
+
+    # ADX 30-45 — tendencia fuerte y sostenida
+    # Supertrend se activa aquí — requiere tendencia clara para funcionar
+    'TRENDING_STRONG':  ['EMA_CROSS', 'MACD', 'SUPERTREND'],
+
+    # ADX > 45 — tendencia extrema (eventos macro, noticias de alto impacto)
+    # Breakout captura rupturas de rango, Supertrend sigue la tendencia
+    'TRENDING_EXTREME': ['BREAKOUT', 'SUPERTREND'],
+
+    # Alta volatilidad sin dirección — spread alto, riesgo extremo
+    'VOLATILE':         [],
+
+    # Fallback si no hay datos suficientes
+    'UNKNOWN':          ['EMA_CROSS'],
 }
 
-# Estrategias adicionales disponibles pero desactivadas por bajo rendimiento.
-# Reactivar cuando los datos muestren mejora sostenida (mínimo 15 trades):
-#   SUPERTREND  → 0 trades generados en H1, funciona mejor en H4
-#   BREAKOUT    → 0 trades en H1, diseñado para H4 (ya configurado en SYMBOL_CONFIG)
-#   BOLLINGER   → WR < 25% en entorno tendencial actual
-STRATEGIES_INACTIVE = ['SUPERTREND', 'BREAKOUT', 'BOLLINGER']
+# Máximo de bots activos simultáneos por símbolo
+# Evita sobrecargar el margen y reduce el ruido
+MAX_BOTS_PER_SYMBOL = 2  # máximo 2 bots por símbolo
 
+# ---------------------------------------------------------------------------
+# Configuración de timeframe por símbolo
+# ---------------------------------------------------------------------------
 SYMBOL_CONFIG = {
     'EURUSD': {'timeframe': mt5.TIMEFRAME_H1,  'atr_period': 14},
     'GBPUSD': {'timeframe': mt5.TIMEFRAME_H1,  'atr_period': 14},
@@ -63,17 +88,18 @@ SYMBOL_CONFIG = {
     'BTCUSD': {'timeframe': mt5.TIMEFRAME_H4,  'atr_period': 14},
 }
 
-# Estrategias preferidas por símbolo basadas en WR histórico real.
-# Cuando el régimen detector inicia bots, prioriza estas estrategias.
-# Si la estrategia preferida ya está activa, no inicia la segunda.
+# ---------------------------------------------------------------------------
+# Estrategia preferida por símbolo (basada en WR histórico real)
+# Se prioriza al iniciar bots — ocupa el primer slot disponible
+# ---------------------------------------------------------------------------
 SYMBOL_PREFERRED_STRATEGY = {
     'EURUSD': 'EMA_CROSS',   # 60% WR histórico
     'GBPUSD': 'EMA_CROSS',   # 50% WR histórico
     'USDJPY': 'EMA_CROSS',   # rendimiento estable
     'XAUUSD': 'MACD',        # 62.5% WR histórico
-    'AUDUSD': 'EMA_CROSS',   # 100% WR (1 trade — confirmar con más datos)
-    'USDCAD': 'EMA_CROSS',   # 71.4% WR — mejor estrategia del sistema
-    'US30':   'MACD',        # tendencia clara
+    'AUDUSD': 'EMA_CROSS',   # 100% WR (confirmar con más trades)
+    'USDCAD': 'EMA_CROSS',   # 71.4% WR — mejor del sistema
+    'US30':   'BREAKOUT',    # H4 — Breakout en tendencias extremas
     'BTCUSD': 'MACD',        # 75% WR histórico
 }
 
@@ -136,32 +162,58 @@ class RegimeDetector:
             bb_width_avg = ((bb_upper - bb_lower) / bb_middle * 100).iloc[-20:].mean()
             bb_squeeze   = bb_width < (bb_width_avg * 0.8)
 
-            # Clasificación
-            if atr_ratio >= ATR_VOLATILE_RATIO and adx < ADX_TREND_THRESHOLD:
+            # ----------------------------------------------------------------
+            # Clasificación en 5 niveles según fuerza del ADX
+            # ----------------------------------------------------------------
+
+            # 1. Volatilidad extrema sin dirección — no operar
+            if atr_ratio >= ATR_VOLATILE_RATIO and adx < ADX_TRENDING_MILD:
                 regime = 'VOLATILE'
-            elif adx >= ADX_TREND_THRESHOLD:
-                if price_above and ema200_slope > 0:
-                    regime = 'TRENDING_UP'
-                elif not price_above and ema200_slope < 0:
-                    regime = 'TRENDING_DOWN'
-                else:
-                    regime = 'TRENDING_UP' if price_above else 'TRENDING_DOWN'
-            elif adx < ADX_RANGE_THRESHOLD or bb_squeeze:
-                regime = 'RANGING'
+
+            # 2. Tendencia extrema — ADX > 45 — Breakout + Supertrend
+            elif adx > ADX_TRENDING_STRONG:
+                regime = 'TRENDING_EXTREME'
+
+            # 3. Tendencia fuerte — ADX 30-45 — EMA + MACD + Supertrend
+            elif adx > ADX_TRENDING_MILD:
+                regime = 'TRENDING_STRONG'
+
+            # 4. Tendencia moderada — ADX 22-30 — EMA + MACD
+            elif adx > ADX_RANGING_MILD:
+                regime = 'TRENDING_MILD'
+
+            # 5. Lateral moderado — ADX 18-22 — Williams + MA Cross + RSI
+            elif adx > ADX_RANGING_PURE:
+                regime = 'RANGING_MILD'
+
+            # 6. Lateral puro — ADX < 18 o BB squeeze — Bollinger + Williams + RSI
             else:
-                if abs(ema200_slope) > 0.1:
-                    regime = 'TRENDING_UP' if ema200_slope > 0 else 'TRENDING_DOWN'
-                else:
-                    regime = 'RANGING'
+                regime = 'RANGING_PURE'
+
+            # Para regímenes de tendencia, agregar dirección (UP/DOWN)
+            # Breakout y Supertrend no necesitan dirección — siguen la tendencia
+            regime_with_dir = regime
+            if regime in ('TRENDING_MILD', 'TRENDING_STRONG'):
+                direction = '_UP' if price_above else '_DOWN'
+                # Nota: las estrategias son iguales para UP y DOWN en estos niveles
+                # La dirección se guarda en el resultado pero no cambia las estrategias
 
             result = {
-                'regime':       regime,
+                'regime':       regime_with_dir,
                 'adx':          round(adx, 1),
+                'adx_level':    (
+                    'EXTREME' if adx > ADX_TRENDING_STRONG else
+                    'STRONG'  if adx > ADX_TRENDING_MILD  else
+                    'MILD'    if adx > ADX_RANGING_MILD   else
+                    'RANGING_MILD' if adx > ADX_RANGING_PURE else
+                    'RANGING_PURE'
+                ),
                 'ema200_slope': round(ema200_slope, 3),
                 'atr_ratio':    round(atr_ratio, 2),
                 'bb_squeeze':   bb_squeeze,
                 'price_vs_ema': 'above' if price_above else 'below',
-                'strategies':   STRATEGIES_BY_REGIME.get(regime, []),
+                'direction':    'UP' if price_above else 'DOWN',
+                'strategies':   STRATEGIES_BY_REGIME.get(regime_with_dir, []),
                 'updated_at':   datetime.now(timezone.utc).isoformat(),
             }
 
@@ -193,7 +245,6 @@ class RegimeDetector:
         que no generan trades en H1.
         """
         changes = {'started': [], 'stopped': []}
-        MAX_BOTS_PER_SYMBOL = 2
 
         for symbol, regime_data in self._regimes.items():
             regime           = regime_data.get('regime', 'UNKNOWN')
@@ -201,18 +252,8 @@ class RegimeDetector:
             active_map       = self._get_active_by_symbol(symbol)
             active_types     = set(active_map.values())
 
-            # Detener estrategias inactivas (Supertrend, Breakout, Bollinger)
-            # que no generan trades en el entorno actual
-            for s_type in list(active_types):
-                if s_type in STRATEGIES_INACTIVE:
-                    s_id = f"{s_type}_{symbol}"
-                    if self.trading_service.stop_strategy(s_id):
-                        changes['stopped'].append(s_id)
-                        active_types.discard(s_type)
-                        logger.info(
-                            f"Régimen: detenido {s_id} "
-                            f"(estrategia inactiva — 0 trades en H1)"
-                        )
+            # Las estrategias se activan/desactivan según el régimen detectado.
+            # No hay lista de inactivas — cada estrategia tiene su régimen ideal.
 
             # Detener estrategias no aptas para el régimen actual
             to_stop = active_types - ideal_strategies
@@ -318,11 +359,13 @@ class RegimeDetector:
         try:
             from utils.telegram_notifier import send_message
             emoji_map = {
-                'TRENDING_UP':   '🟢 TENDENCIA ↑',
-                'TRENDING_DOWN': '🔴 TENDENCIA ↓',
-                'RANGING':       '🟡 LATERAL',
-                'VOLATILE':      '⚠️ VOLÁTIL',
-                'UNKNOWN':       '❓ DESCONOCIDO',
+                'TRENDING_EXTREME': '🚀 TENDENCIA EXTREMA',
+                'TRENDING_STRONG':  '🟢 TENDENCIA FUERTE',
+                'TRENDING_MILD':    '🔵 TENDENCIA MODERADA',
+                'RANGING_MILD':     '🟡 LATERAL MODERADO',
+                'RANGING_PURE':     '⚪ LATERAL PURO',
+                'VOLATILE':         '⚠️ VOLÁTIL',
+                'UNKNOWN':          '❓ DESCONOCIDO',
             }
             lines = ["📊 <b>Régimen de mercado actualizado</b>\n"]
             for symbol, data in self._regimes.items():
@@ -351,6 +394,8 @@ class RegimeDetector:
         result = {
             'regime':     'UNKNOWN',
             'adx':        0,
+            'adx_level':  'UNKNOWN',
+            'direction':  'UNKNOWN',
             'strategies': STRATEGIES_BY_REGIME['UNKNOWN'],
             'updated_at': datetime.now(timezone.utc).isoformat(),
         }
