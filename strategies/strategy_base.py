@@ -10,6 +10,10 @@ Mejoras aplicadas vs version anterior:
      - evita cerrar en la misma vela/iteracion que se abrio
   4. Registro de tiempo de apertura por ticket (_position_open_times)
   5. cooldowns_active visible en get_statistics() para monitoreo desde frontend
+  6. Persistencia de stats en disco (stats_{strategy_id}.json)
+     - trades_count, wins, losses sobreviven reinicios del servidor
+     - el auto-escalado de riesgo mantiene su historial entre sesiones
+     - carga automatica en start(), guardado automatico en update_stats()
 """
 import threading
 import time
@@ -18,6 +22,7 @@ import urllib.request
 from abc import ABC, abstractmethod
 from typing import Optional, Dict, List
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 import pandas as pd
 
 from utils.logger import get_logger
@@ -31,6 +36,14 @@ except ImportError:
     _TELEGRAM_AVAILABLE = False
 
 logger = get_logger(__name__)
+
+# Circuit breaker — importación lazy para evitar circular imports en tests
+try:
+    from core.circuit_breaker import circuit_breaker as _circuit_breaker
+    _CB_AVAILABLE = True
+except ImportError:
+    _circuit_breaker = None
+    _CB_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # Parametros de proteccion — ajustar segun necesidades
@@ -92,6 +105,36 @@ NEWS_MINUTES_BEFORE = 30   # bloquear 30 min antes del evento
 NEWS_MINUTES_AFTER  = 30   # bloquear 30 min después del evento
 NEWS_CALENDAR_URL   = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 NEWS_CACHE_MINUTES  = 60   # refrescar calendario cada hora
+
+# ---------------------------------------------------------------------------
+# Filtro de spread máximo por símbolo
+# Bloquea entradas cuando el spread supera el umbral (durante noticias, apertura
+# de mercados, fines de semana o periodos de baja liquidez).
+# Valores en unidades de precio (no pips) para ser agnóstico al instrumento.
+# ---------------------------------------------------------------------------
+SPREAD_FILTER_ENABLED = True
+
+MAX_SPREAD = {
+    'EURUSD': 0.00030,   # 3 pips
+    'GBPUSD': 0.00040,   # 4 pips
+    'USDJPY': 0.030,     # 3 pips (JPY)
+    'XAUUSD': 0.50,      # $0.50
+    'AUDUSD': 0.00035,
+    'USDCAD': 0.00035,
+    'US30':   5.0,       # 5 puntos
+    'BTCUSD': 30.0,      # $30
+}
+DEFAULT_MAX_SPREAD = 0.00050
+
+# ---------------------------------------------------------------------------
+# Filtro de alineación multi-timeframe (H4)
+# Solo permite entradas cuya dirección es coherente con la tendencia H4.
+# Usa la pendiente de EMA50 en H4: si el slope supera el umbral, la tendencia
+# es clara y se bloquean operaciones en contra de ella.
+# Esto reduce drasticamente las señales falsas en estrategias de tendencia.
+# ---------------------------------------------------------------------------
+MTF_FILTER_ENABLED  = True
+MTF_SLOPE_THRESHOLD = 0.04   # % de pendiente EMA50-H4 necesario para considerar tendencia
 
 # ---------------------------------------------------------------------------
 # Ajuste dinámico de SL según volatilidad del día
@@ -165,6 +208,11 @@ class StrategyBase(ABC):
         self._thread = None
         self.positions: Dict[str, Position] = {}
         self._stats = {"trades_count": 0, "wins": 0, "losses": 0}
+
+        # Identificador único del bot: "TIPO_SIMBOLO" — coincide con trading_service
+        # Se asigna desde fuera (trading_service.start_strategy) para garantizar
+        # consistencia. Si no se asigna, se genera un fallback desde el nombre.
+        self._strategy_id: Optional[str] = None
 
         # Tiempo de apertura por ticket: {ticket: datetime}
         self._position_open_times: Dict[int, datetime] = {}
@@ -403,6 +451,72 @@ class StrategyBase(ABC):
             logger.error(f"Error en filtro de noticias: {e}")
             return False
 
+    def _is_spread_acceptable(self, symbol: str) -> bool:
+        """
+        Retorna False si el spread actual supera el máximo configurado para el símbolo.
+        Evita entradas durante noticias de alto impacto (spread se amplía antes del
+        blackout de noticias), apertura del mercado los lunes o baja liquidez.
+        En caso de error obteniedo datos, permite la operación (no bloquea).
+        """
+        if not SPREAD_FILTER_ENABLED:
+            return True
+        try:
+            market_data = self.connector.get_market_data(symbol)
+            if not market_data:
+                return True
+            current_spread = market_data.spread
+            max_spread = MAX_SPREAD.get(symbol, DEFAULT_MAX_SPREAD)
+            if current_spread > max_spread:
+                logger.info(
+                    f"{self.name} | {symbol}: spread elevado {current_spread:.5f} "
+                    f"> máx {max_spread:.5f} — entrada bloqueada"
+                )
+                return False
+            return True
+        except Exception as e:
+            logger.debug(f"Error en filtro de spread para {symbol}: {e}")
+            return True
+
+    def _is_htf_aligned(self, symbol: str, direction: str) -> bool:
+        """
+        Verifica que la dirección de la señal sea coherente con la tendencia H4
+        calculada mediante la pendiente de EMA50. Solo bloquea si la tendencia H4
+        es claramente contraria a la señal (slope supera MTF_SLOPE_THRESHOLD).
+        En mercados laterales (slope bajo el umbral) permite ambas direcciones.
+        En caso de error obteniedo datos, permite la operación (no bloquea).
+        """
+        if not MTF_FILTER_ENABLED:
+            return True
+        try:
+            import MetaTrader5 as mt5
+            df_h4 = self.market_analyzer.get_candles(symbol, mt5.TIMEFRAME_H4, count=60)
+            if df_h4 is None or len(df_h4) < 55:
+                return True
+            ema50 = self.market_analyzer.calculate_ema(df_h4, 50)
+            if ema50 is None or ema50.isna().all():
+                return True
+            ema_now  = ema50.iloc[-1]
+            ema_prev = ema50.iloc[-10]
+            if pd.isna(ema_now) or pd.isna(ema_prev) or ema_prev == 0:
+                return True
+            slope = (ema_now - ema_prev) / ema_prev * 100
+            if direction == 'BUY' and slope < -MTF_SLOPE_THRESHOLD:
+                logger.info(
+                    f"{self.name} | {symbol}: BUY bloqueado — "
+                    f"tendencia H4 bajista (EMA50 slope={slope:.3f}%)"
+                )
+                return False
+            if direction == 'SELL' and slope > MTF_SLOPE_THRESHOLD:
+                logger.info(
+                    f"{self.name} | {symbol}: SELL bloqueado — "
+                    f"tendencia H4 alcista (EMA50 slope={slope:.3f}%)"
+                )
+                return False
+            return True
+        except Exception as e:
+            logger.debug(f"Error en filtro MTF para {symbol}: {e}")
+            return True
+
     def _get_volatility_sl_multiplier(self, symbol: str) -> float:
         """
         Calcula un multiplicador de SL basado en la volatilidad actual vs promedio.
@@ -566,6 +680,14 @@ class StrategyBase(ABC):
     def execute_signal(self, symbol: str, signal: Dict) -> bool:
         """Ejecuta una senal de trading con todas las protecciones activas."""
         try:
+            # -1. Circuit breaker — bloquea el bot si acumuló demasiadas pérdidas
+            if _CB_AVAILABLE:
+                cb_id = self._get_circuit_breaker_id(symbol)
+                allowed, cb_reason = _circuit_breaker.is_allowed(cb_id)
+                if not allowed:
+                    logger.warning(f"{self.name} | {symbol}: {cb_reason}")
+                    return False
+
             # 0. Filtro de sesion — no abrir nuevas posiciones fuera de horario
             if not self._is_trading_session():
                 return False
@@ -576,6 +698,14 @@ class StrategyBase(ABC):
 
             # 0c. Filtro de noticias — no operar cerca de eventos de alto impacto
             if self._is_news_blackout():
+                return False
+
+            # 0d. Filtro de spread — no entrar con spread excesivo
+            if not self._is_spread_acceptable(symbol):
+                return False
+
+            # 0e. Alineación multi-timeframe — solo operar en la dirección del H4
+            if not self._is_htf_aligned(symbol, signal.get('direction', '')):
                 return False
 
             # 1. Posicion ya abierta por este bot
@@ -929,24 +1059,42 @@ class StrategyBase(ABC):
             f"{symbol} hoy: {daily_count}/{MAX_DAILY_TRADES_PER_SYMBOL}"
         )
 
-        # Alerta Telegram
+        # Alerta Telegram — en thread separado para no bloquear el loop de trading.
+        # Una llamada lenta a la API de Telegram (3-5s) retrasaría la siguiente
+        # iteración si se hiciera síncronamente desde el hilo de la estrategia.
         if _TELEGRAM_AVAILABLE:
             try:
                 positions = self.connector.get_positions(symbol)
                 pos = next((p for p in positions if p.ticket == result.ticket), None)
                 if pos:
-                    alert_trade_opened(
-                        strategy  = self.name,
-                        symbol    = symbol,
-                        direction = pos.type,
-                        entry     = pos.price_open,
-                        sl        = pos.stop_loss or 0,
-                        tp        = pos.take_profit or 0,
-                        volume    = pos.volume,
-                        risk_pct  = self.risk_manager.max_risk_per_trade
-                    )
+                    _strategy_name = self.name
+                    _symbol        = symbol
+                    _pos           = pos
+                    _risk_pct      = self.risk_manager.max_risk_per_trade
+
+                    def _send_open_alert(strat, sym, position, rp):
+                        try:
+                            alert_trade_opened(
+                                strategy  = strat,
+                                symbol    = sym,
+                                direction = position.type,
+                                entry     = position.price_open,
+                                sl        = position.stop_loss or 0,
+                                tp        = position.take_profit or 0,
+                                volume    = position.volume,
+                                risk_pct  = rp
+                            )
+                        except Exception as _e:
+                            logger.debug(f"Telegram open alert error: {_e}")
+
+                    import threading as _th
+                    _th.Thread(
+                        target=_send_open_alert,
+                        args=(_strategy_name, _symbol, _pos, _risk_pct),
+                        daemon=True
+                    ).start()
             except Exception as e:
-                logger.debug(f"Telegram alert error: {e}")
+                logger.debug(f"Telegram alert dispatch error: {e}")
 
     def on_trade_closed(self, position: Position, result) -> None:
         """Callback cuando se cierra una operacion. Activa cooldown."""
@@ -999,6 +1147,123 @@ class StrategyBase(ABC):
             f"Losses: {self._stats['losses']}"
         )
 
+        # Persistir stats en disco para que sobrevivan reinicios
+        self._save_stats()
+
+        # Notificar al circuit breaker con el resultado del trade
+        if _CB_AVAILABLE:
+            try:
+                # update_stats es llamado con el symbol de la posición que cerró
+                # pero aquí no tenemos el symbol directamente — usamos el primero
+                # de la lista. Para bots mono-símbolo (como los nuestros) es correcto.
+                symbol = self.symbols[0] if self.symbols else "UNKNOWN"
+                cb_id = self._get_circuit_breaker_id(symbol)
+                _circuit_breaker.record_trade_result(cb_id, profit)
+            except Exception as e:
+                logger.debug(f"CircuitBreaker record error: {e}")
+
+    def _get_circuit_breaker_id(self, symbol: str) -> str:
+        """
+        Devuelve el ID único del bot para el circuit breaker.
+        Usa _strategy_id si fue asignado desde trading_service,
+        o construye un fallback desde el nombre de la estrategia.
+        Formato esperado: "TIPO_SIMBOLO" (ej: "BOLLINGER_GBPUSD")
+        """
+        if self._strategy_id:
+            return self._strategy_id
+        # Fallback: construir desde nombre — normalizar a mayúsculas sin espacios
+        name_clean = self.name.upper().replace(" ", "_").replace("+", "").replace("-", "_")
+        return f"{name_clean}_{symbol}"
+
+    # =======================================================================
+    # Persistencia de stats entre reinicios
+    # =======================================================================
+
+    def _stats_file_path(self) -> Path:
+        """
+        Ruta del archivo de stats para este bot.
+        Usa _strategy_id si está asignado (garantiza unicidad incluso si
+        dos bots tienen el mismo nombre pero distinto símbolo).
+        Ejemplo: stats_MACD_XAUUSD.json, stats_EMA_CROSS_AUDUSD.json
+        """
+        bot_id = self._strategy_id or (
+            self.name.upper()
+            .replace(" ", "_")
+            .replace("+", "")
+            .replace("-", "_")
+        )
+        return Path(f"stats_{bot_id}.json")
+
+    def _save_stats(self) -> None:
+        """
+        Persiste trades_count, wins y losses en disco.
+        Se llama tras cada trade cerrado (update_stats).
+        Solo guarda los contadores núcleo — las claves internas de logging
+        (_scale_logged_up, _scale_logged_reduce) se descartan intencionalmente
+        porque son flags de sesión y no tienen valor tras reiniciar.
+        """
+        try:
+            payload = {
+                "strategy_id":   self._strategy_id or self.name,
+                "trades_count":  self._stats.get("trades_count", 0),
+                "wins":          self._stats.get("wins", 0),
+                "losses":        self._stats.get("losses", 0),
+                "last_updated":  datetime.now().isoformat(),
+            }
+            self._stats_file_path().write_text(
+                json.dumps(payload, indent=2, ensure_ascii=False),
+                encoding="utf-8"
+            )
+        except Exception as e:
+            logger.error(f"Error guardando stats de '{self.name}': {e}")
+
+    def _load_stats(self) -> None:
+        """
+        Carga stats persistidas desde disco al arrancar el bot.
+        Si el archivo no existe (bot nuevo o primera ejecución), conserva
+        los contadores en 0 sin error — comportamiento normal.
+        Si el archivo existe pero está corrupto, lo ignora y arranca limpio
+        logueando el error para investigación.
+        """
+        path = self._stats_file_path()
+        if not path.exists():
+            logger.info(
+                f"'{self.name}': sin stats previas — "
+                f"arrancando con contadores en 0 ({path})"
+            )
+            return
+        try:
+            raw = path.read_text(encoding="utf-8").strip()
+            if not raw:
+                return
+            data = json.loads(raw)
+            loaded_count  = int(data.get("trades_count", 0))
+            loaded_wins   = int(data.get("wins", 0))
+            loaded_losses = int(data.get("losses", 0))
+
+            # Validación mínima: wins + losses no puede superar trades_count
+            if loaded_wins + loaded_losses > loaded_count:
+                raise ValueError(
+                    f"Stats inconsistentes: wins({loaded_wins}) + "
+                    f"losses({loaded_losses}) > trades_count({loaded_count})"
+                )
+
+            self._stats["trades_count"] = loaded_count
+            self._stats["wins"]         = loaded_wins
+            self._stats["losses"]       = loaded_losses
+
+            win_rate = loaded_wins / loaded_count * 100 if loaded_count > 0 else 0.0
+            logger.info(
+                f"'{self.name}': stats restauradas desde disco — "
+                f"{loaded_count} trades | {loaded_wins}W/{loaded_losses}L | "
+                f"WR {win_rate:.1f}% | archivo: {path}"
+            )
+        except Exception as e:
+            logger.error(
+                f"Error cargando stats de '{self.name}' desde {path}: {e} — "
+                f"arrancando con contadores en 0"
+            )
+
     # =======================================================================
     # Ciclo de vida del hilo
     # =======================================================================
@@ -1008,6 +1273,10 @@ class StrategyBase(ABC):
         if self.is_running:
             logger.warning(f"Estrategia '{self.name}' ya esta en ejecucion.")
             return
+        # Cargar stats persistidas antes de arrancar el hilo
+        # Esto restaura trades_count/wins/losses para que el auto-escalado
+        # retome desde donde quedó antes del reinicio del servidor
+        self._load_stats()
         self.is_running = True
         logger.info(f"Estrategia '{self.name}' iniciada")
         self._thread = threading.Thread(target=self._run_loop, daemon=True)

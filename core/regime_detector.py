@@ -33,10 +33,16 @@ ADX_TRENDING_STRONG  = 40.0   # ADX 25-40 → tendencia fuerte (EMA+MACD+SUPERTR
 # ADX > 40 → tendencia extrema (BREAKOUT+SUPERTREND)
 # ADX > 45            → tendencia extrema (Breakout + Supertrend)
 
-ATR_VOLATILE_RATIO   = 2.0    # ATR actual > 2x promedio = volátil
-EMA_SLOPE_PERIODS    = 10     # velas para calcular pendiente EMA200
-REGIME_UPDATE_HOURS  = 4      # re-evaluar cada 4 horas
-REGIME_UPDATE_AT_OPEN = True  # evaluar siempre a las 07:00 UTC
+ATR_VOLATILE_RATIO    = 2.0    # ATR actual > 2x promedio = volátil
+EMA_SLOPE_PERIODS     = 10     # velas para calcular pendiente EMA200
+REGIME_UPDATE_HOURS   = 4      # re-evaluar cada 4 horas
+REGIME_UPDATE_AT_OPEN = True   # evaluar siempre a las 07:00 UTC
+
+# Histéresis de régimen: el ADX debe superar el umbral de transición en al menos
+# REGIME_HYSTERESIS puntos para que el régimen cambie. Previene que oscilaciones
+# menores alrededor de un umbral (ej: ADX 21-23 cerca del límite 22) causen
+# arranques y paradas continuas de bots cada 4 horas.
+REGIME_HYSTERESIS = 2.0
 
 # ---------------------------------------------------------------------------
 # Estrategias por nivel de régimen
@@ -53,11 +59,13 @@ STRATEGIES_BY_REGIME = {
 
     # ADX 22-30 — tendencia moderada, la más común en Forex
     # EMA Cross y MACD son los más rentables en este rango (WR 60-75%)
-    'TRENDING_MILD':    ['EMA_CROSS', 'MACD'],
+    # London ORB se activa aquí: el impulso del open requiere tendencia moderada
+    'TRENDING_MILD':    ['EMA_CROSS', 'MACD', 'LONDON_ORB'],
 
     # ADX 30-45 — tendencia fuerte y sostenida
     # Supertrend se activa aquí — requiere tendencia clara para funcionar
-    'TRENDING_STRONG':  ['EMA_CROSS', 'MACD', 'SUPERTREND'],
+    # London ORB también funciona bien con tendencia fuerte
+    'TRENDING_STRONG':  ['EMA_CROSS', 'MACD', 'SUPERTREND', 'LONDON_ORB'],
 
     # ADX > 45 — tendencia extrema (eventos macro, noticias de alto impacto)
     # Breakout captura rupturas de rango, Supertrend sigue la tendencia
@@ -93,14 +101,14 @@ SYMBOL_CONFIG = {
 # Se prioriza al iniciar bots — ocupa el primer slot disponible
 # ---------------------------------------------------------------------------
 SYMBOL_PREFERRED_STRATEGY = {
-    'EURUSD': 'EMA_CROSS',   # 60% WR histórico
-    'GBPUSD': 'EMA_CROSS',   # 50% WR histórico
-    'USDJPY': 'EMA_CROSS',   # rendimiento estable
-    'XAUUSD': 'MACD',        # 62.5% WR histórico
-    'AUDUSD': 'EMA_CROSS',   # 100% WR (confirmar con más trades)
-    'USDCAD': 'EMA_CROSS',   # 71.4% WR — mejor del sistema
-    'US30':   'BREAKOUT',    # H4 — Breakout en tendencias extremas
-    'BTCUSD': 'MACD',        # 75% WR histórico
+    'EURUSD': 'EMA_CROSS',    # 60% WR histórico
+    'GBPUSD': 'LONDON_ORB',   # ORB es ideal para GBP en London Open
+    'USDJPY': 'EMA_CROSS',    # rendimiento estable
+    'XAUUSD': 'MACD',         # 83% WR histórico — mantener el mejor bot activo
+    'AUDUSD': 'EMA_CROSS',    # 100% WR (confirmar con más trades)
+    'USDCAD': 'EMA_CROSS',    # 71.4% WR — mejor del sistema
+    'US30':   'BREAKOUT',     # H4 — Breakout en tendencias extremas
+    'BTCUSD': 'MACD',         # 75% WR histórico
 }
 
 
@@ -117,6 +125,74 @@ class RegimeDetector:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         logger.info("RegimeDetector inicializado")
+
+    # -----------------------------------------------------------------------
+    # Clasificación ADX con histéresis
+    # -----------------------------------------------------------------------
+
+    def _classify_adx_plain(self, adx: float) -> str:
+        """Clasificación directa por umbrales sin histéresis."""
+        if adx > ADX_TRENDING_STRONG:  return 'TRENDING_EXTREME'
+        if adx > ADX_TRENDING_MILD:    return 'TRENDING_STRONG'
+        if adx > ADX_RANGING_MILD:     return 'TRENDING_MILD'
+        if adx > ADX_RANGING_PURE:     return 'RANGING_MILD'
+        return 'RANGING_PURE'
+
+    def _classify_adx_with_hysteresis(
+        self, adx: float, atr_ratio: float, previous_regime: str
+    ) -> str:
+        """
+        Clasifica el régimen aplicando histéresis respecto al régimen anterior.
+        Para moverse a un régimen superior, el ADX debe superar el umbral + H.
+        Para moverse a un régimen inferior, el ADX debe caer bajo el umbral - H.
+        Esto previene oscilaciones cuando el ADX ronda un umbral de transición.
+        El régimen VOLATILE y UNKNOWN no aplican histéresis (seguridad prioritaria).
+        """
+        h = REGIME_HYSTERESIS
+
+        # Volátil: siempre tiene prioridad — no aplica histéresis
+        if atr_ratio >= ATR_VOLATILE_RATIO and adx < ADX_TRENDING_MILD:
+            return 'VOLATILE'
+
+        # Sin régimen previo: clasificar sin histéresis
+        if previous_regime in ('UNKNOWN', 'VOLATILE'):
+            return self._classify_adx_plain(adx)
+
+        if previous_regime == 'RANGING_PURE':
+            # Para salir hacia arriba: necesita ADX > umbral + H
+            if adx > ADX_RANGING_PURE + h:
+                return self._classify_adx_plain(adx)
+            return 'RANGING_PURE'
+
+        if previous_regime == 'RANGING_MILD':
+            if adx > ADX_RANGING_MILD + h:
+                return self._classify_adx_plain(adx)
+            if adx < ADX_RANGING_PURE - h:
+                return 'RANGING_PURE'
+            return 'RANGING_MILD'
+
+        if previous_regime == 'TRENDING_MILD':
+            if adx > ADX_TRENDING_MILD + h:
+                return self._classify_adx_plain(adx)
+            if adx < ADX_RANGING_MILD - h:
+                return self._classify_adx_plain(adx)
+            return 'TRENDING_MILD'
+
+        if previous_regime == 'TRENDING_STRONG':
+            if adx > ADX_TRENDING_STRONG + h:
+                return 'TRENDING_EXTREME'
+            if adx < ADX_TRENDING_MILD - h:
+                return self._classify_adx_plain(adx)
+            return 'TRENDING_STRONG'
+
+        if previous_regime == 'TRENDING_EXTREME':
+            if adx < ADX_TRENDING_STRONG - h:
+                return self._classify_adx_plain(adx)
+            return 'TRENDING_EXTREME'
+
+        return self._classify_adx_plain(adx)
+
+    # -----------------------------------------------------------------------
 
     def get_regime(self, symbol: str) -> str:
         return self._regimes.get(symbol, {}).get('regime', 'UNKNOWN')
@@ -163,49 +239,25 @@ class RegimeDetector:
             bb_squeeze   = bb_width < (bb_width_avg * 0.8)
 
             # ----------------------------------------------------------------
-            # Clasificación en 5 niveles según fuerza del ADX
+            # Clasificación en 5 niveles con histéresis respecto al régimen anterior
             # ----------------------------------------------------------------
+            previous_regime = self._regimes.get(symbol, {}).get('regime', 'UNKNOWN')
+            regime = self._classify_adx_with_hysteresis(adx, atr_ratio, previous_regime)
 
-            # 1. Volatilidad extrema sin dirección — no operar
-            if atr_ratio >= ATR_VOLATILE_RATIO and adx < ADX_TRENDING_MILD:
-                regime = 'VOLATILE'
-
-            # 2. Tendencia extrema — ADX > 45 — Breakout + Supertrend
-            elif adx > ADX_TRENDING_STRONG:
-                regime = 'TRENDING_EXTREME'
-
-            # 3. Tendencia fuerte — ADX 30-45 — EMA + MACD + Supertrend
-            elif adx > ADX_TRENDING_MILD:
-                regime = 'TRENDING_STRONG'
-
-            # 4. Tendencia moderada — ADX 22-30 — EMA + MACD
-            elif adx > ADX_RANGING_MILD:
-                regime = 'TRENDING_MILD'
-
-            # 5. Lateral moderado — ADX 18-22 — Williams + MA Cross + RSI
-            elif adx > ADX_RANGING_PURE:
-                regime = 'RANGING_MILD'
-
-            # 6. Lateral puro — ADX < 18 o BB squeeze — Bollinger + Williams + RSI
-            else:
-                regime = 'RANGING_PURE'
-
-            # Para regímenes de tendencia, agregar dirección (UP/DOWN)
-            # Breakout y Supertrend no necesitan dirección — siguen la tendencia
-            regime_with_dir = regime
-            if regime in ('TRENDING_MILD', 'TRENDING_STRONG'):
-                direction = '_UP' if price_above else '_DOWN'
-                # Nota: las estrategias son iguales para UP y DOWN en estos niveles
-                # La dirección se guarda en el resultado pero no cambia las estrategias
+            if regime != previous_regime and previous_regime not in ('UNKNOWN', 'VOLATILE'):
+                logger.info(
+                    f"Régimen {symbol}: {previous_regime} → {regime} "
+                    f"(ADX={adx:.1f}, H={REGIME_HYSTERESIS})"
+                )
 
             result = {
-                'regime':       regime_with_dir,
+                'regime':       regime,
                 'adx':          round(adx, 1),
                 'adx_level':    (
-                    'EXTREME' if adx > ADX_TRENDING_STRONG else
-                    'STRONG'  if adx > ADX_TRENDING_MILD  else
-                    'MILD'    if adx > ADX_RANGING_MILD   else
-                    'RANGING_MILD' if adx > ADX_RANGING_PURE else
+                    'EXTREME'      if adx > ADX_TRENDING_STRONG else
+                    'STRONG'       if adx > ADX_TRENDING_MILD   else
+                    'MILD'         if adx > ADX_RANGING_MILD    else
+                    'RANGING_MILD' if adx > ADX_RANGING_PURE    else
                     'RANGING_PURE'
                 ),
                 'ema200_slope': round(ema200_slope, 3),
@@ -213,7 +265,7 @@ class RegimeDetector:
                 'bb_squeeze':   bb_squeeze,
                 'price_vs_ema': 'above' if price_above else 'below',
                 'direction':    'UP' if price_above else 'DOWN',
-                'strategies':   STRATEGIES_BY_REGIME.get(regime_with_dir, []),
+                'strategies':   STRATEGIES_BY_REGIME.get(regime, []),
                 'updated_at':   datetime.now(timezone.utc).isoformat(),
             }
 

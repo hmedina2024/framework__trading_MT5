@@ -2,13 +2,23 @@
 Gestor de riesgo para operaciones de trading
 """
 from typing import Optional, Dict
+import json
 import threading
 import time
 from datetime import datetime
+from pathlib import Path
 
 from utils.logger import get_logger
 from models.trade_models import TradeRequest, AccountInfo
 from config.settings import settings
+
+BALANCE_STATE_FILE = Path("balance_state.json")
+
+# ---------------------------------------------------------------------------
+# Modo demo: False en producción para que el límite de pérdida diaria aplique.
+# Cambia a True únicamente para pruebas sin restricciones de drawdown diario.
+# ---------------------------------------------------------------------------
+DEMO_MODE = False
 
 logger = get_logger(__name__)
 
@@ -19,11 +29,24 @@ class RiskManager:
         self.max_daily_loss = max_daily_loss or settings.MAX_DAILY_LOSS
         # DEMO: maximo de posiciones aumentado a 30 para evaluar multiples estrategias
         self.max_open_positions = max_open_positions or 30
-        account_info = self.connector.get_account_info()
-        self.balance_at_start = account_info.balance if account_info else None
         self._daily_loss_alerted = False
+        self._portfolio_drawdown_alerted = False
         self._symbol_last_closed: dict = {}
         self._reentry_cooldown = 120  # segundos de cooldown post SL/TP
+
+        # Cargar balance_at_start desde disco para sobrevivir reinicios intradía.
+        # Si el archivo existe y tiene la fecha de hoy, usamos ese balance como base;
+        # de lo contrario obtenemos el balance actual y lo persistimos.
+        saved = self._load_balance_at_start()
+        if saved is not None:
+            self.balance_at_start = saved
+            logger.info(f"RiskManager: balance_at_start recuperado desde disco: ${saved:.2f}")
+        else:
+            account_info = self.connector.get_account_info()
+            self.balance_at_start = account_info.balance if account_info else None
+            if self.balance_at_start:
+                self._save_balance_at_start(self.balance_at_start)
+
         logger.info(
             f"RiskManager inicializado | "
             f"Riesgo por trade: {self.max_risk_per_trade*100}% | "
@@ -121,9 +144,6 @@ class RiskManager:
         return True
 
     def _check_daily_loss(self, account_info: AccountInfo) -> tuple[bool, str]:
-        # DEMO MODE: limite de perdida diaria desactivado para evaluacion de estrategias.
-        # Cambiar a False para reactivar en produccion.
-        DEMO_MODE = True
         if DEMO_MODE:
             if self.balance_at_start and self.balance_at_start > 0:
                 current_balance = account_info.balance
@@ -159,8 +179,31 @@ class RiskManager:
         account_info = self.connector.get_account_info()
         if account_info:
             self.balance_at_start = account_info.balance
+            self._save_balance_at_start(self.balance_at_start)
             self._daily_loss_alerted = False
+            self._portfolio_drawdown_alerted = False
             logger.info(f"📅 Stats diarias reseteadas. Nuevo balance base: ${self.balance_at_start:.2f}")
+
+    def _load_balance_at_start(self) -> Optional[float]:
+        """Carga el balance_at_start del día desde disco. Retorna None si no existe o es de otro día."""
+        try:
+            if BALANCE_STATE_FILE.exists():
+                data = json.loads(BALANCE_STATE_FILE.read_text(encoding="utf-8"))
+                if data.get("date") == datetime.now().strftime("%Y-%m-%d"):
+                    return float(data["balance"])
+        except Exception as e:
+            logger.warning(f"No se pudo cargar balance_state.json: {e}")
+        return None
+
+    def _save_balance_at_start(self, balance: float) -> None:
+        """Persiste el balance_at_start con la fecha actual para sobrevivir reinicios."""
+        try:
+            BALANCE_STATE_FILE.write_text(
+                json.dumps({"date": datetime.now().strftime("%Y-%m-%d"), "balance": balance}),
+                encoding="utf-8"
+            )
+        except Exception as e:
+            logger.error(f"Error guardando balance_state.json: {e}")
 
     def _start_daily_reset_scheduler(self):
         def scheduler_loop():
@@ -228,6 +271,52 @@ class RiskManager:
             return 0.0
         return reward / risk
 
+    def _check_portfolio_drawdown(self, account_info: AccountInfo) -> tuple[bool, str]:
+        """
+        Bloquea todas las entradas si el drawdown flotante del portfolio supera
+        MAX_PORTFOLIO_DRAWDOWN. Protege contra pérdidas coordinadas en eventos macro
+        cuando varios bots pierden simultáneamente en mercados correlacionados.
+        Drawdown = (balance - equity) / balance — mide pérdidas flotantes abiertas.
+        """
+        if account_info.balance <= 0:
+            return True, ""
+        drawdown = (account_info.balance - account_info.equity) / account_info.balance
+        if drawdown > settings.MAX_PORTFOLIO_DRAWDOWN:
+            msg = (
+                f"Drawdown de portfolio {drawdown*100:.1f}% supera el límite "
+                f"({settings.MAX_PORTFOLIO_DRAWDOWN*100:.0f}%) — "
+                f"todas las entradas bloqueadas hasta reducir exposición"
+            )
+            if not self._portfolio_drawdown_alerted:
+                logger.warning(f"⛔ PORTFOLIO DRAWDOWN: {msg}")
+                self._portfolio_drawdown_alerted = True
+                try:
+                    from utils.telegram_notifier import send_message
+                    send_message(
+                        f"⛔ <b>Portfolio Drawdown — Entradas BLOQUEADAS</b>\n"
+                        f"Drawdown flotante: <b>{drawdown*100:.1f}%</b> "
+                        f"(límite {settings.MAX_PORTFOLIO_DRAWDOWN*100:.0f}%)\n"
+                        f"Balance: <b>${account_info.balance:.2f}</b> | "
+                        f"Equity: <b>${account_info.equity:.2f}</b>\n"
+                        f"Pérdida flotante: <b>-${account_info.balance - account_info.equity:.2f}</b>\n"
+                        f"Nuevas entradas bloqueadas hasta reducir exposición.",
+                        silent=False
+                    )
+                except Exception:
+                    pass
+            return False, msg
+        # Si el drawdown baja del límite, resetear la alerta para poder disparar de nuevo
+        if self._portfolio_drawdown_alerted:
+            self._portfolio_drawdown_alerted = False
+        # Aviso preventivo al 70% del límite
+        if drawdown > settings.MAX_PORTFOLIO_DRAWDOWN * 0.70:
+            warn_remaining = (settings.MAX_PORTFOLIO_DRAWDOWN - drawdown) * account_info.balance
+            logger.warning(
+                f"Drawdown de portfolio en {drawdown*100:.1f}% — "
+                f"${warn_remaining:.2f} de margen antes del bloqueo total"
+            )
+        return True, ""
+
     def is_trading_allowed(self) -> tuple[bool, str]:
         account_info = self.connector.get_account_info()
         if not account_info:
@@ -239,6 +328,9 @@ class RiskManager:
         daily_ok, daily_msg = self._check_daily_loss(account_info)
         if not daily_ok:
             return False, daily_msg
+        portfolio_ok, portfolio_msg = self._check_portfolio_drawdown(account_info)
+        if not portfolio_ok:
+            return False, portfolio_msg
         if not self._check_max_positions():
             return False, f"Número máximo de posiciones alcanzado ({self.max_open_positions})"
         return True, "Trading permitido"

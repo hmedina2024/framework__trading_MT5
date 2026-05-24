@@ -11,6 +11,7 @@ from strategies import (
     MACDStrategy,
     BreakoutStrategy,
     StrategyBase,
+    LondonORBStrategy,
 )
 from strategies.supertrend_strategy import SupertrendStrategy
 from strategies.ema_crossover_strategy import EMACrossoverStrategy
@@ -150,8 +151,8 @@ class TradingService:
         },
         "BOLLINGER": {
             "name": "Bollinger Bands Mean Reversion",
-            "description": "Reversión a la media cuando el precio toca las bandas de Bollinger.",
-            "timeframe": "H1",
+            "description": "Reversión a la media en H4 con filtro Z-score >= 2.0. Solo opera en mercados laterales reales (ADX < 20). Confirmación de vela y RSI girando.",
+            "timeframe": "H4",
             "class": "BollingerBandsStrategy",
         },
         "MACD": {
@@ -183,6 +184,12 @@ class TradingService:
             "description": "Reversiones desde zonas extremas de Williams %R con filtro EMA 50. Complementa a Bollinger para mayor cobertura.",
             "timeframe": "H1",
             "class": "WilliamsRStrategy",
+        },
+        "LONDON_ORB": {
+            "name": "London Opening Range Breakout",
+            "description": "Breakout del rango de las 3 primeras velas H1 del London Open (07-10 UTC). Alta efectividad en GBPUSD y XAUUSD. Una entrada por sesión.",
+            "timeframe": "H1",
+            "class": "LondonORBStrategy",
         },
     }
 
@@ -294,6 +301,7 @@ class TradingService:
                 'SUPERTREND': 260000,
                 'EMA_CROSS':  270000,
                 'WILLIAMS_R': 280000,
+                'LONDON_ORB': 300000,
             }
             SYMBOL_OFFSET = {
                 'EURUSD': 1, 'GBPUSD': 2, 'USDJPY': 3, 'XAUUSD': 4,
@@ -323,7 +331,7 @@ class TradingService:
                 )
             elif strategy_type == "BOLLINGER":
                 strategy = BollingerBandsStrategy(
-                    **common_args, timeframe=mt5.TIMEFRAME_H1
+                    **common_args, timeframe=mt5.TIMEFRAME_H4
                 )
             elif strategy_type == "MACD":
                 strategy = MACDStrategy(
@@ -343,6 +351,10 @@ class TradingService:
                 )
             elif strategy_type == "WILLIAMS_R":
                 strategy = WilliamsRStrategy(
+                    **common_args, timeframe=mt5.TIMEFRAME_H1
+                )
+            elif strategy_type == "LONDON_ORB":
+                strategy = LondonORBStrategy(
                     **common_args, timeframe=mt5.TIMEFRAME_H1
                 )
             else:
@@ -382,10 +394,11 @@ class TradingService:
 
             # Mapear timeframe
             TF_MAP = {
-                'MA_CROSS': mt5.TIMEFRAME_H1, 'RSI': mt5.TIMEFRAME_H1,
-                'BOLLINGER': mt5.TIMEFRAME_H1, 'MACD': mt5.TIMEFRAME_H1,
-                'BREAKOUT': mt5.TIMEFRAME_H4, 'SUPERTREND': mt5.TIMEFRAME_H1,
-                'EMA_CROSS': mt5.TIMEFRAME_H1, 'WILLIAMS_R': mt5.TIMEFRAME_H1,
+                'MA_CROSS':   mt5.TIMEFRAME_H1, 'RSI':        mt5.TIMEFRAME_H1,
+                'BOLLINGER':  mt5.TIMEFRAME_H4, 'MACD':       mt5.TIMEFRAME_H1,
+                'BREAKOUT':   mt5.TIMEFRAME_H4, 'SUPERTREND': mt5.TIMEFRAME_H1,
+                'EMA_CROSS':  mt5.TIMEFRAME_H1, 'WILLIAMS_R': mt5.TIMEFRAME_H1,
+                'LONDON_ORB': mt5.TIMEFRAME_H1,
             }
             timeframe = TF_MAP.get(strategy_type, mt5.TIMEFRAME_H1)
             candles_needed = days * 24 if timeframe == mt5.TIMEFRAME_H1 else days * 6
@@ -407,12 +420,13 @@ class TradingService:
             strategy_map = {
                 'MA_CROSS':   ('MovingAverageCrossStrategy', mt5.TIMEFRAME_H1),
                 'RSI':        ('RSIStrategy', mt5.TIMEFRAME_H1),
-                'BOLLINGER':  ('BollingerBandsStrategy', mt5.TIMEFRAME_H1),
+                'BOLLINGER':  ('BollingerBandsStrategy', mt5.TIMEFRAME_H4),
                 'MACD':       ('MACDStrategy', mt5.TIMEFRAME_H1),
                 'BREAKOUT':   ('BreakoutStrategy', mt5.TIMEFRAME_H4),
                 'SUPERTREND': ('SupertrendStrategy', mt5.TIMEFRAME_H1),
                 'EMA_CROSS':  ('EMACrossoverStrategy', mt5.TIMEFRAME_H1),
                 'WILLIAMS_R': ('WilliamsRStrategy', mt5.TIMEFRAME_H1),
+                'LONDON_ORB': ('LondonORBStrategy', mt5.TIMEFRAME_H1),
             }
             class_name, tf = strategy_map.get(strategy_type, ('MACDStrategy', mt5.TIMEFRAME_H1))
             strategy_classes = {
@@ -424,6 +438,7 @@ class TradingService:
                 'SupertrendStrategy': SupertrendStrategy,
                 'EMACrossoverStrategy': EMACrossoverStrategy,
                 'WilliamsRStrategy': WilliamsRStrategy,
+                'LondonORBStrategy': LondonORBStrategy,
             }
             StratClass = strategy_classes.get(class_name, MACDStrategy)
             strategy = StratClass(**common_args, timeframe=tf)
@@ -448,7 +463,25 @@ class TradingService:
 
                 direction = signal['direction']
                 entry_bar = df_full.iloc[i+1]  # siguiente vela = entrada simulada
-                entry     = entry_bar['open']
+
+                # Obtener info del símbolo una sola vez por backtest (fuera del loop sería ideal
+                # pero como puede fallar la incluimos aquí con guard)
+                symbol_info = self.connector.get_symbol_info(symbol)
+                if not symbol_info:
+                    continue
+
+                # Ajustar precio de entrada por spread real del instrumento.
+                # Los datos OHLC de MT5 son precios bid. Para BUY la ejecución real
+                # ocurre al ask (bid + spread), lo que reduce la ganancia potencial.
+                # Para SELL se ejecuta al bid — sin ajuste de spread en la entrada.
+                spread_cost = symbol_info.spread * symbol_info.point
+                if direction == 'BUY':
+                    entry = entry_bar['open'] + spread_cost
+                else:
+                    entry = entry_bar['open']
+
+                # Comisión round-trip estimada (~$7 por lote estándar, típico Pepperstone)
+                COMMISSION_RT_PER_LOT = 7.0
 
                 # Calcular SL/TP usando ATR de las últimas 14 velas
                 atr_series = self.market_analyzer.calculate_atr(df_slice.tail(20))
@@ -461,6 +494,8 @@ class TradingService:
                     sl_mult, tp_mult = 1.5, 2.5
                 elif strategy_type == 'BREAKOUT':
                     sl_mult, tp_mult = 2.0, 4.0
+                elif strategy_type == 'LONDON_ORB':
+                    sl_mult, tp_mult = 1.0, 1.5  # SL = rango, TP = 1.5x rango
 
                 if direction == 'BUY':
                     sl = entry - atr * sl_mult
@@ -469,17 +504,19 @@ class TradingService:
                     sl = entry + atr * sl_mult
                     tp = entry - atr * tp_mult
 
-                # Calcular volumen (1% del balance)
+                # Calcular volumen (% del balance según risk_pct)
                 risk_money  = balance * risk_pct
                 risk_points = abs(entry - sl)
-                symbol_info = self.connector.get_symbol_info(symbol)
-                if not symbol_info or risk_points <= 0:
+                if risk_points <= 0:
                     continue
                 risk_per_lot = (risk_points / symbol_info.point) * symbol_info.tick_value
                 if risk_per_lot <= 0:
                     continue
                 volume = min(max(risk_money / risk_per_lot, symbol_info.volume_min), symbol_info.volume_max)
-                volume = symbol_info.normalize_volume(volume)
+                # Normalizar al step permitido por el broker
+                step   = symbol_info.volume_step
+                volume = round(volume / step) * step if step > 0 else volume
+                volume = max(symbol_info.volume_min, min(symbol_info.volume_max, volume))
 
                 # Simular resultado mirando las siguientes velas (máx 50)
                 result_pnl = None
@@ -514,6 +551,9 @@ class TradingService:
                         result_pnl = ((close_price - entry) / symbol_info.point) * symbol_info.tick_value * volume
                     else:
                         result_pnl = ((entry - close_price) / symbol_info.point) * symbol_info.tick_value * volume
+
+                # Descontar comisión round-trip — refleja el costo real de cada trade
+                result_pnl -= COMMISSION_RT_PER_LOT * volume
 
                 balance += result_pnl
                 if balance > peak_balance:

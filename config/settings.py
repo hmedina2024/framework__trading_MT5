@@ -31,9 +31,13 @@ class Settings:
     MAX_SLIPPAGE: int = int(os.getenv("MAX_SLIPPAGE", "10"))
     
     # Configuración de gestión de riesgo
-    MAX_RISK_PER_TRADE: float = float(os.getenv("MAX_RISK_PER_TRADE", "0.01"))  # 1% — reducido de 2% para proteger capital en demo
-    MAX_DAILY_LOSS: float = float(os.getenv("MAX_DAILY_LOSS", "0.05"))  # 5%
+    MAX_RISK_PER_TRADE: float = float(os.getenv("MAX_RISK_PER_TRADE", "0.01"))  # 1%
+    MAX_DAILY_LOSS: float = float(os.getenv("MAX_DAILY_LOSS", "0.05"))          # 5%
     MAX_OPEN_POSITIONS: int = int(os.getenv("MAX_OPEN_POSITIONS", "5"))
+    # Drawdown máximo simultáneo del portfolio (equity vs balance).
+    # Si las pérdidas flotantes superan este porcentaje, se bloquean nuevas entradas
+    # hasta que se reduzca la exposición. Protege contra eventos macro correlacionados.
+    MAX_PORTFOLIO_DRAWDOWN: float = float(os.getenv("MAX_PORTFOLIO_DRAWDOWN", "0.08"))  # 8%
     
     @classmethod
     def validate(cls) -> bool:
