@@ -28,8 +28,7 @@ class Settings:
     # Configuración de trading
     DEFAULT_DEVIATION: int = int(os.getenv("DEFAULT_DEVIATION", "20"))
     DEFAULT_MAGIC_NUMBER: int = int(os.getenv("DEFAULT_MAGIC_NUMBER", "234000"))
-    MAX_SLIPPAGE: int = int(os.getenv("MAX_SLIPPAGE", "10"))
-    
+
     # Configuración de gestión de riesgo
     MAX_RISK_PER_TRADE: float = float(os.getenv("MAX_RISK_PER_TRADE", "0.01"))  # 1%
     MAX_DAILY_LOSS: float = float(os.getenv("MAX_DAILY_LOSS", "0.05"))          # 5%

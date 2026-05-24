@@ -13,11 +13,13 @@ Clasificador de Régimen de Mercado — Fase 1A del Plan ML
 Cada estrategia se activa solo en el contexto donde estadísticamente funciona.
 Se ejecuta cada 4h y a las 07:00 UTC (apertura de Londres).
 """
+import json
 import MetaTrader5 as mt5
 import pandas as pd
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import Dict, List, Optional
 from utils.logger import get_logger
 
@@ -79,8 +81,28 @@ STRATEGIES_BY_REGIME = {
 }
 
 # Máximo de bots activos simultáneos por símbolo
-# Evita sobrecargar el margen y reduce el ruido
-MAX_BOTS_PER_SYMBOL = 2  # máximo 2 bots por símbolo
+MAX_BOTS_PER_SYMBOL = 2
+
+# ---------------------------------------------------------------------------
+# Filtro de rendimiento por bot
+# Un bot con historial suficiente y WR bajo no se inicia aunque el régimen sea
+# correcto. Se re-evalúa en cada ciclo (cada 4h), por lo que un bot bloqueado
+# puede volver a activarse si su WR mejora con el tiempo.
+# ---------------------------------------------------------------------------
+PERFORMANCE_MIN_TRADES   = 15    # trades mínimos para aplicar el filtro
+PERFORMANCE_MIN_WR       = 0.38  # WR mínimo para INICIAR un bot
+PERFORMANCE_STOP_WR      = 0.30  # WR mínimo para MANTENER un bot corriendo
+
+# Ventana deslizante: cuántos trades recientes usar para evaluar WR.
+# Debe coincidir con ROLLING_WINDOW_SIZE de strategy_base.py.
+ROLLING_WINDOW_SIZE      = 20
+
+# Horas de pausa obligatoria antes de dar al bot una segunda oportunidad.
+# Tras este período, el bot puede arrancar de nuevo si el régimen lo requiere.
+# Si en la siguiente evaluación su WR reciente sigue bajo, se pausa otra vez.
+PERFORMANCE_RETRY_HOURS  = 48
+
+BLOCKED_STATE_FILE = Path("performance_blocked_state.json")
 
 # ---------------------------------------------------------------------------
 # Configuración de timeframe por símbolo
@@ -124,6 +146,9 @@ class RegimeDetector:
         self._last_update: Optional[datetime] = None
         self._running = False
         self._thread: Optional[threading.Thread] = None
+        # {strategy_id: blocked_until_datetime} — bots pausados por bajo rendimiento
+        self._performance_blocked: Dict[str, datetime] = {}
+        self._load_blocked_state()
         logger.info("RegimeDetector inicializado")
 
     # -----------------------------------------------------------------------
@@ -283,6 +308,11 @@ class RegimeDetector:
 
     def detect_all_regimes(self) -> Dict[str, Dict]:
         logger.info("Detectando regímenes para todos los símbolos...")
+        # Actualizar estrategia preferida por símbolo con datos reales antes de detectar
+        try:
+            self._update_preferred_strategies()
+        except Exception as e:
+            logger.warning(f"_update_preferred_strategies error: {e}")
         for symbol in SYMBOL_CONFIG:
             self.detect_regime(symbol)
         self._last_update = datetime.now(timezone.utc)
@@ -290,11 +320,14 @@ class RegimeDetector:
 
     def apply_regimes(self) -> Dict[str, List[str]]:
         """
-        Inicia y detiene bots según el régimen actual de cada símbolo.
-        Máximo 2 bots por símbolo. Prioriza las estrategias con mejor
-        historial definidas en SYMBOL_PREFERRED_STRATEGY.
-        Detiene automáticamente estrategias inactivas (SUPERTREND, BREAKOUT)
-        que no generan trades en H1.
+        Inicia y detiene bots según el régimen actual y el rendimiento real de cada bot.
+
+        Lógica:
+          1. Detiene bots cuyo tipo no aplica al régimen actual.
+          2. Detiene bots activos con WR crónicamente bajo (< PERFORMANCE_STOP_WR).
+          3. Inicia bots aptos para el régimen, priorizando los de mejor WR real.
+             Bots con WR < PERFORMANCE_MIN_WR (y suficientes trades) no se inician.
+          4. Actualiza SYMBOL_PREFERRED_STRATEGY con el mejor performer real.
         """
         changes = {'started': [], 'stopped': []}
 
@@ -304,52 +337,80 @@ class RegimeDetector:
             active_map       = self._get_active_by_symbol(symbol)
             active_types     = set(active_map.values())
 
-            # Las estrategias se activan/desactivan según el régimen detectado.
-            # No hay lista de inactivas — cada estrategia tiene su régimen ideal.
-
-            # Detener estrategias no aptas para el régimen actual
-            to_stop = active_types - ideal_strategies
-            for s_type in to_stop:
+            # 1. Detener bots no aptos para el régimen actual
+            to_stop_regime = active_types - ideal_strategies
+            for s_type in to_stop_regime:
                 s_id = f"{s_type}_{symbol}"
                 if self.trading_service.stop_strategy(s_id):
                     changes['stopped'].append(s_id)
                     active_types.discard(s_type)
-                    logger.info(
-                        f"Régimen {regime}: detenido {s_id} "
-                        f"(no apto para régimen actual)"
-                    )
+                    logger.info(f"Régimen {regime}: detenido {s_id} (fuera de régimen)")
 
-            # Iniciar estrategias solo si había bots activos y hay espacio
-            if active_types or len(active_map) > 0:
-                # Ordenar por preferencia del símbolo
-                preferred = SYMBOL_PREFERRED_STRATEGY.get(symbol)
-                ordered_strategies = []
-                if preferred and preferred in ideal_strategies:
-                    ordered_strategies.append(preferred)
-                for s in ideal_strategies:
-                    if s not in ordered_strategies:
-                        ordered_strategies.append(s)
-
-                # Solo iniciar hasta llegar al máximo de bots por símbolo
-                current_active = set(self._get_active_by_symbol(symbol).values())
-                for s_type in ordered_strategies:
-                    if len(current_active) >= MAX_BOTS_PER_SYMBOL:
-                        break
-                    if s_type not in current_active:
-                        if self.trading_service.start_strategy(symbol, s_type):
-                            changes['started'].append(f"{s_type}_{symbol}")
-                            current_active.add(s_type)
-                            logger.info(
-                                f"Régimen {regime}: iniciado {s_type} en {symbol} "
-                                f"({len(current_active)}/{MAX_BOTS_PER_SYMBOL})"
+            # 2. Detener bots activos con rendimiento crónicamente bajo
+            for s_type in list(active_types):
+                stop, stop_reason = self._should_stop_bot(s_type, symbol)
+                if stop:
+                    s_id = f"{s_type}_{symbol}"
+                    if self.trading_service.stop_strategy(s_id):
+                        changes['stopped'].append(s_id)
+                        active_types.discard(s_type)
+                        # Registrar pausa con temporizador de reintentos
+                        retry_at = datetime.now() + timedelta(hours=PERFORMANCE_RETRY_HOURS)
+                        self._performance_blocked[s_id] = retry_at
+                        self._save_blocked_state()
+                        logger.warning(
+                            f"Bot detenido por bajo rendimiento: {s_id} — {stop_reason} | "
+                            f"segunda oportunidad a las {retry_at.strftime('%d/%m %H:%M')}"
+                        )
+                        try:
+                            from utils.telegram_notifier import send_message
+                            send_message(
+                                f"📉 <b>Bot pausado por rendimiento</b>\n"
+                                f"Bot: <b>{s_id}</b>\n"
+                                f"Motivo: {stop_reason}\n"
+                                f"Segunda oportunidad: <b>{retry_at.strftime('%d/%m/%Y %H:%M')}</b>",
+                                silent=True
                             )
+                        except Exception:
+                            pass
+
+            # 3. Ordenar candidatos por WR real (mejor primero), con preferido como desempate
+            preferred = SYMBOL_PREFERRED_STRATEGY.get(symbol)
+            scored: List[tuple] = []
+            for s_type in ideal_strategies:
+                stats = self._load_bot_stats(s_type, symbol)
+                wr    = stats['win_rate'] if stats['win_rate'] is not None else 0.5
+                bonus = 0.02 if s_type == preferred else 0.0
+                scored.append((s_type, wr + bonus, stats['trades_count']))
+            # Primero los de mayor WR; si sin datos (< min_trades), al final
+            scored.sort(key=lambda x: (-x[1], x[2] < PERFORMANCE_MIN_TRADES))
+
+            # 4. Iniciar bots hasta el límite, respetando filtro de rendimiento
+            current_active = set(self._get_active_by_symbol(symbol).values())
+            for s_type, _score, _trades in scored:
+                if len(current_active) >= MAX_BOTS_PER_SYMBOL:
+                    break
+                if s_type in current_active:
+                    continue
+                can_start, perf_reason = self._can_start_bot(s_type, symbol)
+                if not can_start:
+                    logger.info(
+                        f"Régimen {regime}: omitiendo {s_type}_{symbol} — {perf_reason}"
+                    )
+                    continue
+                if self.trading_service.start_strategy(symbol, s_type):
+                    changes['started'].append(f"{s_type}_{symbol}")
+                    current_active.add(s_type)
+                    logger.info(
+                        f"Régimen {regime}: iniciado {s_type} en {symbol} "
+                        f"({len(current_active)}/{MAX_BOTS_PER_SYMBOL}) — {perf_reason}"
+                    )
 
         total = len(changes['started']) + len(changes['stopped'])
         if total > 0:
             logger.info(
                 f"Cambios de régimen: {len(changes['started'])} iniciados, "
-                f"{len(changes['stopped'])} detenidos — "
-                f"máx {MAX_BOTS_PER_SYMBOL} bots/símbolo"
+                f"{len(changes['stopped'])} detenidos"
             )
         return changes
 
@@ -441,6 +502,195 @@ class RegimeDetector:
                     if s_symbol == symbol:
                         result[s_id] = catalog_type
         return result
+
+    # -----------------------------------------------------------------------
+    # Gestión adaptativa por rendimiento
+    # -----------------------------------------------------------------------
+
+    def _load_blocked_state(self) -> None:
+        """Carga el estado de bloqueo de bots desde disco al arrancar."""
+        if not BLOCKED_STATE_FILE.exists():
+            return
+        try:
+            data = json.loads(BLOCKED_STATE_FILE.read_text(encoding='utf-8'))
+            now  = datetime.now()
+            for sid, dt_str in data.items():
+                blocked_until = datetime.fromisoformat(dt_str)
+                if blocked_until > now:
+                    self._performance_blocked[sid] = blocked_until
+            expired = len(data) - len(self._performance_blocked)
+            logger.info(
+                f"RegimeDetector: {len(self._performance_blocked)} bots en pausa "
+                f"cargados desde disco ({expired} expirados ignorados)"
+            )
+        except Exception as e:
+            logger.warning(f"No se pudo cargar estado de bloqueo: {e}")
+
+    def _save_blocked_state(self) -> None:
+        """Persiste el estado de bloqueo para que sobreviva reinicios del servidor."""
+        try:
+            data = {sid: dt.isoformat() for sid, dt in self._performance_blocked.items()}
+            BLOCKED_STATE_FILE.write_text(
+                json.dumps(data, indent=2, ensure_ascii=False),
+                encoding='utf-8'
+            )
+        except Exception as e:
+            logger.error(f"Error guardando estado de bloqueo: {e}")
+
+    def _load_bot_stats(self, strategy_type: str, symbol: str) -> Dict:
+        """
+        Lee stats_{TIPO_SIMBOLO}.json y retorna métricas de rendimiento.
+        Devuelve tanto el WR total (historial completo) como el WR de la
+        ventana deslizante (últimos ROLLING_WINDOW_SIZE trades).
+        """
+        stats_file = Path(f"stats_{strategy_type}_{symbol}.json")
+        default = {
+            'trades_count': 0, 'wins': 0, 'losses': 0,
+            'win_rate': None, 'recent_win_rate': None, 'recent_count': 0,
+        }
+        if not stats_file.exists():
+            return default
+        try:
+            data   = json.loads(stats_file.read_text(encoding='utf-8'))
+            trades = int(data.get('trades_count', 0))
+            wins   = int(data.get('wins', 0))
+
+            # Ventana deslizante
+            recent        = data.get('recent_results', [])
+            recent_count  = len(recent)
+            recent_wr     = sum(recent) / recent_count if recent_count >= 5 else None
+
+            return {
+                'trades_count':   trades,
+                'wins':           wins,
+                'losses':         int(data.get('losses', 0)),
+                'win_rate':       wins / trades if trades > 0 else None,
+                'recent_win_rate': recent_wr,
+                'recent_count':   recent_count,
+            }
+        except Exception:
+            return default
+
+    def _can_start_bot(self, strategy_type: str, symbol: str) -> tuple:
+        """
+        (can_start: bool, reason: str)
+
+        Orden de evaluación:
+          1. Pausa por rendimiento activa → bloquear hasta que expire.
+          2. Pausa expirada → segunda oportunidad: limpiar bloqueo y permitir.
+          3. WR de ventana deslizante < PERFORMANCE_MIN_WR → no iniciar.
+          4. Pocos datos (< PERFORMANCE_MIN_TRADES) → permitir (bot nuevo).
+          5. WR aceptable → permitir.
+        """
+        strategy_id   = f"{strategy_type}_{symbol}"
+        blocked_until = self._performance_blocked.get(strategy_id)
+
+        if blocked_until:
+            now = datetime.now()
+            if now < blocked_until:
+                remaining_h = (blocked_until - now).total_seconds() / 3600
+                return False, (
+                    f"en pausa por rendimiento — "
+                    f"segunda oportunidad en {remaining_h:.0f}h "
+                    f"(a las {blocked_until.strftime('%d/%m %H:%M')})"
+                )
+            # Pausa expirada → limpiar y dar segunda oportunidad
+            del self._performance_blocked[strategy_id]
+            self._save_blocked_state()
+            logger.info(
+                f"Bot {strategy_id}: pausa de rendimiento expirada — "
+                f"segunda oportunidad activa"
+            )
+
+        stats        = self._load_bot_stats(strategy_type, symbol)
+        recent_wr    = stats['recent_win_rate']
+        recent_count = stats['recent_count']
+        total_trades = stats['trades_count']
+
+        # Usar WR de ventana deslizante si hay suficientes datos recientes
+        if recent_wr is not None and recent_count >= PERFORMANCE_MIN_TRADES:
+            if recent_wr < PERFORMANCE_MIN_WR:
+                return False, (
+                    f"WR reciente {recent_wr*100:.0f}% "
+                    f"(últimos {recent_count} trades, mínimo {PERFORMANCE_MIN_WR*100:.0f}%)"
+                )
+            return True, f"WR reciente {recent_wr*100:.0f}% ({recent_count} trades)"
+
+        # Fallback a WR total si ventana insuficiente
+        if total_trades < PERFORMANCE_MIN_TRADES:
+            return True, f"bot nuevo ({total_trades} trades — sin filtro de WR)"
+
+        wr = stats['win_rate']
+        if wr is not None and wr < PERFORMANCE_MIN_WR:
+            return False, (
+                f"WR total {wr*100:.0f}% en {total_trades} trades "
+                f"(mínimo {PERFORMANCE_MIN_WR*100:.0f}%)"
+            )
+        return True, f"WR total {wr*100:.0f}% ({total_trades} trades)"
+
+    def _should_stop_bot(self, strategy_type: str, symbol: str) -> tuple:
+        """
+        (should_stop: bool, reason: str)
+        Prioriza el WR de la ventana deslizante (más relevante) sobre el WR total.
+        Umbral de parada es más permisivo que el de inicio para evitar churning.
+        """
+        stats        = self._load_bot_stats(strategy_type, symbol)
+        recent_wr    = stats['recent_win_rate']
+        recent_count = stats['recent_count']
+        total_trades = stats['trades_count']
+
+        # Evaluar con ventana deslizante si hay suficientes datos
+        if recent_wr is not None and recent_count >= PERFORMANCE_MIN_TRADES:
+            if recent_wr < PERFORMANCE_STOP_WR:
+                return True, (
+                    f"WR reciente {recent_wr*100:.0f}% "
+                    f"(últimos {recent_count} trades, umbral {PERFORMANCE_STOP_WR*100:.0f}%)"
+                )
+            return False, ""
+
+        # Fallback a WR total
+        if total_trades < PERFORMANCE_MIN_TRADES:
+            return False, ""
+
+        wr = stats['win_rate']
+        if wr is not None and wr < PERFORMANCE_STOP_WR:
+            return True, (
+                f"WR total {wr*100:.0f}% en {total_trades} trades "
+                f"(umbral {PERFORMANCE_STOP_WR*100:.0f}%)"
+            )
+        return False, ""
+
+    def _update_preferred_strategies(self) -> None:
+        """
+        Actualiza SYMBOL_PREFERRED_STRATEGY dinámicamente según el WR real
+        de cada combinación estrategia×símbolo. Si una estrategia supera al
+        preferido actual con suficientes trades, lo reemplaza.
+        Garantiza que el primer slot de cada símbolo esté ocupado por el
+        mejor bot disponible según datos reales.
+        """
+        all_types = set(s for strategies in STRATEGIES_BY_REGIME.values() for s in strategies)
+
+        for symbol in SYMBOL_CONFIG:
+            best_type  = None
+            best_wr    = -1.0
+
+            for s_type in all_types:
+                stats = self._load_bot_stats(s_type, symbol)
+                if stats['trades_count'] < PERFORMANCE_MIN_TRADES:
+                    continue
+                wr = stats['win_rate']
+                if wr is not None and wr > best_wr:
+                    best_wr   = wr
+                    best_type = s_type
+
+            if best_type and best_wr >= PERFORMANCE_MIN_WR:
+                current = SYMBOL_PREFERRED_STRATEGY.get(symbol)
+                if current != best_type:
+                    logger.info(
+                        f"Estrategia preferida {symbol}: "
+                        f"{current} → {best_type} (WR {best_wr*100:.0f}% real)"
+                    )
+                    SYMBOL_PREFERRED_STRATEGY[symbol] = best_type
 
     def _unknown(self, symbol: str) -> Dict:
         result = {

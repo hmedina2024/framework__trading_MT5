@@ -45,6 +45,14 @@ except ImportError:
     _circuit_breaker = None
     _CB_AVAILABLE = False
 
+# Signal filter — opcional; si no está disponible no bloquea el trading
+try:
+    from core.signal_filter import signal_filter as _signal_filter, CONFIDENCE_THRESHOLD as _SF_THRESHOLD
+    _SF_AVAILABLE = True
+except ImportError:
+    _signal_filter = None
+    _SF_AVAILABLE = False
+
 # ---------------------------------------------------------------------------
 # Parametros de proteccion — ajustar segun necesidades
 # ---------------------------------------------------------------------------
@@ -168,6 +176,14 @@ MIN_TRADES_TO_SCALE     = 10     # mínimo de trades para evaluar escalado
 MAX_RISK_SCALED         = 0.02   # tope máximo: 2% aunque WR sea 100%
 SCALE_STEP              = 0.001  # incremento por nivel: +0.1% por cada 5% sobre umbral
 
+# ---------------------------------------------------------------------------
+# Ventana deslizante de resultados recientes
+# RegimeDetector evalúa el WR usando solo los últimos ROLLING_WINDOW_SIZE trades
+# en vez del historial total. Esto permite que un bot que tuvo un mal período
+# pueda ser reactivado cuando sus resultados recientes mejoran.
+# ---------------------------------------------------------------------------
+ROLLING_WINDOW_SIZE = 20
+
 
 class StrategyBase(ABC):
     """Clase base abstracta para estrategias de trading."""
@@ -207,7 +223,13 @@ class StrategyBase(ABC):
         self.is_running = False
         self._thread = None
         self.positions: Dict[str, Position] = {}
-        self._stats = {"trades_count": 0, "wins": 0, "losses": 0}
+        self._stats = {
+            "trades_count":   0,
+            "wins":           0,
+            "losses":         0,
+            "avg_rr":         0.0,
+            "recent_results": [],   # lista de 1=win / 0=loss, máx ROLLING_WINDOW_SIZE
+        }
 
         # Identificador único del bot: "TIPO_SIMBOLO" — coincide con trading_service
         # Se asigna desde fuera (trading_service.start_strategy) para garantizar
@@ -233,6 +255,15 @@ class StrategyBase(ABC):
         # Cache de noticias para no hacer requests en cada iteracion
         self._news_cache: List[Dict] = []
         self._news_cache_time: Optional[datetime] = None
+
+        # R:R de la última señal ejecutada → para calcular Fractional Kelly
+        # {ticket: rr_ratio} — se popula en on_trade_opened, se consume en update_stats
+        self._pending_rr: Dict[int, float] = {}
+        self._last_executed_rr: float = 1.0   # temporal hasta conocer el ticket
+
+        # Contexto de señal para el signal_filter (aprendizaje online)
+        # {symbol: context_dict} — se guarda cuando la señal pasa el filtro
+        self._pending_signal_context: Dict[str, Dict] = {}
 
         logger.info(f"Estrategia '{name}' inicializada para {symbols}")
 
@@ -573,12 +604,17 @@ class StrategyBase(ABC):
 
     def _get_scaled_risk(self) -> float:
         """
-        Calcula el riesgo por trade ajustado según el rendimiento histórico
-        de esta estrategia. Escala conservadoramente hacia arriba si la
-        estrategia está funcionando bien, reduce si está funcionando mal.
+        Calcula el riesgo por trade usando Fractional Kelly (half-Kelly).
 
-        Retorna el porcentaje de riesgo a usar (ej: 0.01 = 1%, 0.015 = 1.5%)
-        El resultado nunca supera MAX_RISK_SCALED ni baja del riesgo base.
+        Fórmula: f* = (p*(b+1) - 1) / b
+          p = win_rate, b = avg_rr (ratio recompensa/riesgo promedio)
+        Se usa half-Kelly (f*/2) por conservadurismo.
+
+        El multiplicador resultante se aplica sobre el riesgo base:
+          kelly < 0   → 0.5× base (edge negativo — reducir)
+          kelly 0-0.3 → 1.0×-1.25× base (edge moderado)
+          kelly > 0.3 → hasta 1.5× base (edge sólido)
+        Siempre acotado entre [base/2, MAX_RISK_SCALED].
         """
         if not AUTO_SCALE_ENABLED:
             return self.risk_manager.max_risk_per_trade
@@ -588,47 +624,132 @@ class StrategyBase(ABC):
             trades    = self._stats.get('trades_count', 0)
             wins      = self._stats.get('wins', 0)
 
-            # Sin suficientes trades — usar riesgo base
             if trades < MIN_TRADES_TO_SCALE:
                 return base_risk
 
             win_rate = wins / trades
+            avg_rr   = self._stats.get('avg_rr', 1.5)
+            avg_rr   = max(0.3, avg_rr)   # evitar división por cero o valores absurdos
 
-            # Win rate bajo umbral de reducción — usar riesgo base
-            if win_rate < WIN_RATE_REDUCE:
-                if self._stats.get('_scale_logged_reduce') != round(win_rate, 2):
-                    logger.info(
-                        f"{self.name}: riesgo en base ({base_risk*100:.1f}%) — "
-                        f"WR {win_rate*100:.1f}% < umbral de reduccion {WIN_RATE_REDUCE*100:.0f}%"
-                    )
-                    self._stats['_scale_logged_reduce'] = round(win_rate, 2)
-                return base_risk
+            # Fractional Kelly (half-Kelly)
+            kelly_f  = (win_rate * (avg_rr + 1) - 1) / avg_rr
+            half_k   = kelly_f * 0.5
 
-            # Win rate bajo umbral de escalado — usar riesgo base sin escalar
-            if win_rate < WIN_RATE_THRESHOLD:
-                return base_risk
+            # Mapear half-Kelly a multiplicador de riesgo [0.5, 1.5]
+            # kelly=0 → 1.0x, kelly=0.3 → 1.5x, kelly<0 → <1.0x
+            multiplier = 1.0 + (half_k / 0.3) * 0.5
+            multiplier = max(0.5, min(1.5, multiplier))
 
-            # Win rate >= umbral — calcular escalado
-            # Por cada 5% sobre el umbral, sumar un SCALE_STEP
-            excess_pct   = win_rate - WIN_RATE_THRESHOLD
-            scale_levels = int(excess_pct / 0.05)  # un nivel cada 5% de WR extra
-            scaled_risk  = base_risk + (scale_levels * SCALE_STEP)
-            scaled_risk  = min(scaled_risk, MAX_RISK_SCALED)
+            scaled = min(MAX_RISK_SCALED, base_risk * multiplier)
+            scaled = max(base_risk * 0.5, scaled)   # nunca menos de la mitad
 
-            if scaled_risk > base_risk:
-                if self._stats.get('_scale_logged_up') != round(scaled_risk, 4):
-                    logger.info(
-                        f"{self.name}: riesgo ESCALADO a {scaled_risk*100:.1f}% "
-                        f"(WR {win_rate*100:.1f}%, {trades} trades, "
-                        f"base {base_risk*100:.1f}%, max {MAX_RISK_SCALED*100:.1f}%)"
-                    )
-                    self._stats['_scale_logged_up'] = round(scaled_risk, 4)
+            key = round(scaled, 4)
+            if self._stats.get('_scale_logged') != key:
+                logger.info(
+                    f"{self.name}: riesgo Fractional Kelly = {scaled*100:.2f}% "
+                    f"(WR {win_rate*100:.1f}%, avgRR {avg_rr:.2f}, "
+                    f"kelly={kelly_f:.3f}, mult={multiplier:.2f}x, {trades} trades)"
+                )
+                self._stats['_scale_logged'] = key
 
-            return scaled_risk
+            return scaled
 
         except Exception as e:
             logger.error(f"Error calculando riesgo escalado: {e}")
             return self.risk_manager.max_risk_per_trade
+
+    def _get_vol_scale_factor(self, atr_ratio: float) -> float:
+        """
+        Factor de escala de posición basado en volatilidad relativa.
+        Vol-targeting: cuando el mercado está 2x más volátil que lo normal,
+        reducir el tamaño a la mitad para mantener riesgo en $$ constante.
+        Solo escala HACIA ABAJO — nunca aumenta el tamaño.
+          atr_ratio 1.0 → factor 1.0 (sin cambio)
+          atr_ratio 2.0 → factor 0.5 (mitad del tamaño)
+          atr_ratio 0.5 → factor 1.0 (no aumentar)
+        Acotado entre [0.40, 1.0].
+        """
+        if atr_ratio <= 0:
+            return 1.0
+        scale = min(1.0, 1.0 / atr_ratio)   # solo reducir
+        return max(0.40, scale)
+
+    def _get_regime_tp_multiplier(self, adx: float) -> float:
+        """
+        Ajusta el take-profit según la fuerza de tendencia (ADX).
+        En tendencias fuertes el precio recorre más distancia → TP más amplio.
+        En rangos el movimiento es menor → TP más cercano.
+          ADX < 20  → 0.90× (lateral: TP corto para asegurar ganancia)
+          ADX 20-30 → 1.00× (tendencia moderada: normal)
+          ADX 30-45 → 1.20× (tendencia fuerte: dejar correr)
+          ADX > 45  → 1.40× (tendencia extrema: máximo recorrido)
+        """
+        if adx < 20:   return 0.90
+        elif adx < 30: return 1.00
+        elif adx < 45: return 1.20
+        else:          return 1.40
+
+    def _build_signal_context(self, symbol: str, signal: Dict, df: pd.DataFrame) -> Dict:
+        """
+        Extrae features de contexto para el signal_filter.
+        Reutiliza el DataFrame ya disponible de run_iteration().
+        Las llamadas MT5 adicionales se hacen solo si df está disponible.
+        """
+        now      = datetime.now(timezone.utc)
+        trades   = self._stats.get('trades_count', 0)
+        wins     = self._stats.get('wins', 0)
+        win_rate = wins / trades if trades >= 5 else 0.5
+
+        adx         = 25.0
+        atr_ratio   = 1.0
+        bb_ratio    = 1.0
+        spread_ratio = 0.5
+
+        try:
+            adx_val = self.market_analyzer.calculate_adx(df, period=14)
+            if adx_val:
+                adx = float(adx_val)
+        except Exception:
+            pass
+
+        try:
+            upper, middle, lower = self.market_analyzer.calculate_bollinger_bands(df, 20, 2.0)
+            width = (upper - lower) / middle * 100
+            avg_w = width.iloc[-20:].mean()
+            if avg_w > 0:
+                bb_ratio = float(width.iloc[-1] / avg_w)
+        except Exception:
+            pass
+
+        try:
+            import MetaTrader5 as _mt5
+            df_d = self.market_analyzer.get_candles(symbol, _mt5.TIMEFRAME_D1, count=21)
+            if df_d is not None and len(df_d) >= 5:
+                atr_s = self.market_analyzer.calculate_atr(df_d, period=14)
+                avg   = atr_s.iloc[-20:-1].mean()
+                if avg > 0:
+                    atr_ratio = float(atr_s.iloc[-1] / avg)
+        except Exception:
+            pass
+
+        try:
+            md = self.connector.get_market_data(symbol)
+            max_sp = MAX_SPREAD.get(symbol, DEFAULT_MAX_SPREAD)
+            if md and max_sp > 0:
+                spread_ratio = float(md.spread / max_sp)
+        except Exception:
+            pass
+
+        return {
+            'adx':            adx,
+            'atr_ratio':      atr_ratio,
+            'hour_utc':       now.hour,
+            'day_of_week':    now.weekday(),
+            'spread_ratio':   min(2.0, spread_ratio),
+            'win_rate':       win_rate,
+            'direction':      signal.get('direction', 'BUY'),
+            'bb_width_ratio': bb_ratio,
+        }
 
     def _handle_market_closed(self):
         """
@@ -677,7 +798,7 @@ class StrategyBase(ABC):
     # Ejecucion de senales
     # =======================================================================
 
-    def execute_signal(self, symbol: str, signal: Dict) -> bool:
+    def execute_signal(self, symbol: str, signal: Dict, df: pd.DataFrame = None) -> bool:
         """Ejecuta una senal de trading con todas las protecciones activas."""
         try:
             # -1. Circuit breaker — bloquea el bot si acumuló demasiadas pérdidas
@@ -708,6 +829,25 @@ class StrategyBase(ABC):
             if not self._is_htf_aligned(symbol, signal.get('direction', '')):
                 return False
 
+            # 0f. Signal quality filter (heurístico / LightGBM)
+            # Se evalúa después de los filtros duros para no gastar contexto en señales
+            # que ya serían rechazadas. El contexto se guarda para aprendizaje online.
+            context: Dict = {}
+            if _SF_AVAILABLE and df is not None:
+                try:
+                    context = self._build_signal_context(symbol, signal, df)
+                    score   = _signal_filter.score_signal(
+                        self._strategy_id or self.name, context
+                    )
+                    if score < _SF_THRESHOLD:
+                        logger.info(
+                            f"{self.name} | {symbol}: señal filtrada por calidad "
+                            f"(score={score:.2f} < umbral={_SF_THRESHOLD:.2f})"
+                        )
+                        return False
+                except Exception as _sf_e:
+                    logger.debug(f"SignalFilter error (ignorado): {_sf_e}")
+
             # 1. Posicion ya abierta por este bot
             if self._has_open_position(symbol):
                 logger.info(
@@ -730,8 +870,22 @@ class StrategyBase(ABC):
                 logger.warning(f"Trading no permitido: {reason}")
                 return False
 
-            # 5. Calcular precios
+            # 5. Calcular precios y aplicar multiplicador de TP por régimen (ADX)
             prices = self.calculate_entry_exit(symbol, signal)
+            if context.get('adx'):
+                tp_mult = self._get_regime_tp_multiplier(context['adx'])
+                if tp_mult != 1.0 and prices.get('take_profit'):
+                    entry  = prices['entry']
+                    tp_old = prices['take_profit']
+                    dist   = abs(tp_old - entry) * tp_mult
+                    prices['take_profit'] = (
+                        entry + dist if signal['direction'] == 'BUY' else entry - dist
+                    )
+                    logger.debug(
+                        f"{symbol}: TP ajustado por régimen "
+                        f"(ADX={context['adx']:.1f}, mult={tp_mult}x): "
+                        f"{tp_old:.5f} → {prices['take_profit']:.5f}"
+                    )
 
             # 6. Validar ratio R:R minimo 1:1
             rr_ratio = self.risk_manager.get_risk_reward_ratio(
@@ -750,7 +904,7 @@ class StrategyBase(ABC):
                 )
                 return False
 
-            # 7. Calcular volumen con riesgo escalado si la estrategia lo merece
+            # 7. Calcular volumen con Fractional Kelly
             scaled_risk = self._get_scaled_risk()
             volume = self.risk_manager.calculate_position_size(
                 symbol, prices['entry'], prices['stop_loss'],
@@ -759,6 +913,30 @@ class StrategyBase(ABC):
             if not volume:
                 logger.error(f"No se pudo calcular tamanio de posicion para {symbol}")
                 return False
+
+            # 7b. Vol-targeting: reducir tamaño si la volatilidad actual es mayor a la normal
+            atr_ratio = context.get('atr_ratio', 1.0)
+            vol_scale = self._get_vol_scale_factor(atr_ratio)
+            if vol_scale < 1.0:
+                symbol_info_vt = self.connector.get_symbol_info(symbol)
+                if symbol_info_vt:
+                    vol_adjusted = volume * vol_scale
+                    step = symbol_info_vt.volume_step
+                    if step > 0:
+                        vol_adjusted = round(vol_adjusted / step) * step
+                    vol_adjusted = max(symbol_info_vt.volume_min, vol_adjusted)
+                    if vol_adjusted < volume:
+                        logger.info(
+                            f"{self.name} | {symbol}: vol-targeting "
+                            f"{volume:.2f} → {vol_adjusted:.2f} lotes "
+                            f"(ATR ratio={atr_ratio:.2f}x, escala={vol_scale:.2f})"
+                        )
+                        volume = vol_adjusted
+
+            # Guardar RR y contexto para aprendizaje online
+            self._last_executed_rr = rr_ratio
+            if context:
+                self._pending_signal_context[symbol] = context
 
             # 8. Crear y validar solicitud
             request = TradeRequest(
@@ -828,7 +1006,7 @@ class StrategyBase(ABC):
                 signal = self.analyze(symbol, df)
                 if signal:
                     logger.info(f"Senal detectada para {symbol}: {signal}")
-                    self.execute_signal(symbol, signal)
+                    self.execute_signal(symbol, signal, df=df)
 
                 self._check_open_positions(symbol)
 
@@ -1048,6 +1226,9 @@ class StrategyBase(ABC):
         # Registrar tiempo de apertura para el guard de edad minima
         self._position_open_times[result.ticket] = datetime.now()
 
+        # Capturar R:R de la señal que generó este trade (para Fractional Kelly)
+        self._pending_rr[result.ticket] = self._last_executed_rr
+
         # Incrementar contador diario
         self._increment_daily_trade_count(symbol)
 
@@ -1131,20 +1312,54 @@ class StrategyBase(ABC):
             except Exception as e:
                 logger.debug(f"Telegram alert error: {e}")
 
-        self.update_stats(position.profit)
+        self.update_stats(position.profit, ticket=position.ticket)
 
-    def update_stats(self, profit: float) -> None:
-        """Actualiza estadisticas tras cerrar una operacion."""
-        if profit >= 0:
+        # Registrar resultado en signal_filter para aprendizaje online
+        if _SF_AVAILABLE:
+            ctx = self._pending_signal_context.pop(position.symbol, None)
+            if ctx:
+                try:
+                    _signal_filter.record_outcome(
+                        self._strategy_id or self.name,
+                        ctx,
+                        won=(position.profit >= 0)
+                    )
+                except Exception as _sf_e:
+                    logger.debug(f"SignalFilter record_outcome error: {_sf_e}")
+
+    def update_stats(self, profit: float, ticket: int = None) -> None:
+        """
+        Actualiza estadísticas tras cerrar una operación.
+        Si se pasa ticket, actualiza avg_rr con el R:R real de ese trade
+        (necesario para el cálculo de Fractional Kelly).
+        """
+        won = profit >= 0
+        if won:
             self._stats["wins"] += 1
         else:
             self._stats["losses"] += 1
+
+        # Ventana deslizante: últimos ROLLING_WINDOW_SIZE resultados
+        recent = self._stats.get("recent_results", [])
+        recent.append(1 if won else 0)
+        if len(recent) > ROLLING_WINDOW_SIZE:
+            recent = recent[-ROLLING_WINDOW_SIZE:]
+        self._stats["recent_results"] = recent
+
+        # Actualizar avg_rr con EMA (alpha=0.15 — actualización suave)
+        if ticket is not None:
+            rr = self._pending_rr.pop(ticket, None)
+            if rr and rr > 0:
+                prev = self._stats.get('avg_rr', 0.0)
+                alpha = 0.15
+                self._stats['avg_rr'] = alpha * rr + (1 - alpha) * prev if prev > 0 else rr
 
         logger.info(
             f"Estadisticas de '{self.name}' actualizadas: "
             f"Trades: {self._stats['trades_count']}, "
             f"Wins: {self._stats['wins']}, "
-            f"Losses: {self._stats['losses']}"
+            f"Losses: {self._stats['losses']}, "
+            f"avgRR: {self._stats.get('avg_rr', 0.0):.2f}"
         )
 
         # Persistir stats en disco para que sobrevivan reinicios
@@ -1153,9 +1368,6 @@ class StrategyBase(ABC):
         # Notificar al circuit breaker con el resultado del trade
         if _CB_AVAILABLE:
             try:
-                # update_stats es llamado con el symbol de la posición que cerró
-                # pero aquí no tenemos el symbol directamente — usamos el primero
-                # de la lista. Para bots mono-símbolo (como los nuestros) es correcto.
                 symbol = self.symbols[0] if self.symbols else "UNKNOWN"
                 cb_id = self._get_circuit_breaker_id(symbol)
                 _circuit_breaker.record_trade_result(cb_id, profit)
@@ -1208,7 +1420,9 @@ class StrategyBase(ABC):
                 "trades_count":  self._stats.get("trades_count", 0),
                 "wins":          self._stats.get("wins", 0),
                 "losses":        self._stats.get("losses", 0),
-                "last_updated":  datetime.now().isoformat(),
+                "avg_rr":         round(self._stats.get("avg_rr", 0.0), 4),
+                "recent_results": self._stats.get("recent_results", []),
+                "last_updated":   datetime.now().isoformat(),
             }
             self._stats_file_path().write_text(
                 json.dumps(payload, indent=2, ensure_ascii=False),
@@ -1248,9 +1462,12 @@ class StrategyBase(ABC):
                     f"losses({loaded_losses}) > trades_count({loaded_count})"
                 )
 
-            self._stats["trades_count"] = loaded_count
-            self._stats["wins"]         = loaded_wins
-            self._stats["losses"]       = loaded_losses
+            self._stats["trades_count"]   = loaded_count
+            self._stats["wins"]           = loaded_wins
+            self._stats["losses"]         = loaded_losses
+            self._stats["avg_rr"]         = float(data.get("avg_rr", 0.0))
+            recent_raw = data.get("recent_results", [])
+            self._stats["recent_results"] = [int(r) for r in recent_raw if r in (0, 1)]
 
             win_rate = loaded_wins / loaded_count * 100 if loaded_count > 0 else 0.0
             logger.info(

@@ -1,0 +1,15 @@
+Collecting lightgbm
+  Downloading lightgbm-4.6.0-py3-none-win_amd64.whl.metadata (17 kB)
+Requirement already satisfied: scikit-learn in c:\users\usuario\appdata\local\programs\python\python311\lib\site-packages (1.6.1)
+Requirement already satisfied: certifi in c:\users\usuario\appdata\local\programs\python\python311\lib\site-packages (2025.1.31)
+Requirement already satisfied: numpy>=1.17.0 in c:\users\usuario\appdata\local\programs\python\python311\lib\site-packages (from lightgbm) (2.2.6)
+Requirement already satisfied: scipy in c:\users\usuario\appdata\local\programs\python\python311\lib\site-packages (from lightgbm) (1.15.3)
+Requirement already satisfied: joblib>=1.2.0 in c:\users\usuario\appdata\local\programs\python\python311\lib\site-packages (from scikit-learn) (1.5.1)
+Requirement already satisfied: threadpoolctl>=3.1.0 in c:\users\usuario\appdata\local\programs\python\python311\lib\site-packages (from scikit-learn) (3.6.0)
+Downloading lightgbm-4.6.0-py3-none-win_amd64.whl (1.5 MB)
+   ---------------------------------------- 1.5/1.5 MB 2.4 MB/s  0:00:00
+Installing collected packages: lightgbm
+Successfully installed lightgbm-4.6.0
+
+[notice] A new release of pip is available: 25.3 -> 26.1.1
+[notice] To update, run: python.exe -m pip install --upgrade pip
