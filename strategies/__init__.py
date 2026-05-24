@@ -4,6 +4,7 @@ from .rsi_strategy import RSIStrategy
 from .bollinger_strategy import BollingerBandsStrategy
 from .macd_strategy import MACDStrategy
 from .breakout_strategy import BreakoutStrategy
+from strategies.london_orb_strategy import LondonORBStrategy
 
 __all__ = [
     "StrategyBase",
@@ -12,4 +13,5 @@ __all__ = [
     "BollingerBandsStrategy",
     "MACDStrategy",
     "BreakoutStrategy",
+    "LondonORBStrategy"
 ]

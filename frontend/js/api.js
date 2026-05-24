@@ -6,7 +6,8 @@
 // Bug fix: leer la URL en el momento de cada petición, no al cargar la página.
 // Así funciona correctamente tanto en localhost como en EC2 sin F5 adicional.
 function getApiBase() {
-    return localStorage.getItem('apiUrl') || 'http://localhost:8000/api/v1';
+    return localStorage.getItem('apiUrl') ||
+        `${window.location.protocol}//${window.location.hostname}:8000/api/v1`;
 }
 
 // ============ HTTP CLIENT ============
@@ -65,9 +66,13 @@ const MarketAPI = {
 // ============ ORDERS ============
 
 const OrdersAPI = {
-    getPositions: () => apiRequest('/orders/'),
-    createOrder: (orderData) => apiRequest('/orders/create', 'POST', orderData),
+    getPositions:  () => apiRequest('/orders/'),
+    createOrder:   (orderData) => apiRequest('/orders/create', 'POST', orderData),
     closePosition: (ticket) => apiRequest(`/orders/close/${ticket}`, 'POST'),
+    getHistory:    (days = 30, symbol = null) => {
+        const params = `days=${days}${symbol ? '&symbol=' + symbol : ''}`;
+        return apiRequest(`/orders/history?${params}`);
+    },
 };
 
 // ============ STRATEGIES ============
@@ -78,6 +83,13 @@ const StrategiesAPI = {
     start: (symbol, strategyType = 'MA_CROSS') =>
         apiRequest(`/strategies/start/${symbol}?strategy_type=${strategyType}`, 'POST'),
     stop: (strategyId) => apiRequest(`/strategies/stop/${strategyId}`, 'POST'),
+    backtest: (symbol, strategyType, days = 90, initialBalance = 1000, riskPct = 0.01) => {
+        const params = new URLSearchParams({
+            symbol, strategy_type: strategyType,
+            days, initial_balance: initialBalance, risk_pct: riskPct
+        });
+        return apiRequest(`/strategies/backtest?${params}`, 'POST');
+    },
 };
 
 // ============ ANALYSIS ============

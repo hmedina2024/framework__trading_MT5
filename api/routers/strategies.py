@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from api.core.trading_service import TradingService
+from core.circuit_breaker import circuit_breaker
 from typing import List, Dict
 
 router = APIRouter()
@@ -40,3 +41,62 @@ async def stop_strategy(strategy_id: str, service: TradingService = Depends(get_
     if not success:
         raise HTTPException(status_code=404, detail="Estrategia no encontrada")
     return {"status": "stopped", "id": strategy_id}
+
+@router.get("/regime")
+async def get_regime_status(service: TradingService = Depends(get_trading_service)):
+    """
+    Retorna el régimen de mercado actual para todos los símbolos.
+    Incluye: régimen (TRENDING_UP/DOWN, RANGING, VOLATILE),
+    ADX, pendiente EMA200, ratio ATR y estrategias recomendadas.
+    """
+    return service.get_regime_status()
+
+@router.post("/regime/refresh")
+async def force_regime_refresh(service: TradingService = Depends(get_trading_service)):
+    """
+    Fuerza una re-evaluación inmediata de todos los regímenes.
+    Inicia/detiene bots según el régimen detectado.
+    """
+    if not service.is_connected():
+        raise HTTPException(status_code=503, detail="MT5 no conectado")
+    import asyncio
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, service.force_regime_update)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Circuit Breaker
+# ---------------------------------------------------------------------------
+
+@router.get("/circuit-breaker")
+async def get_circuit_breaker_all():
+    """
+    Retorna el estado del circuit breaker de todos los bots conocidos.
+    Incluye: estado (CLOSED/OPEN/HALF_OPEN), pérdida acumulada, umbral y tiempo de recuperación.
+    """
+    return circuit_breaker.get_all_status()
+
+
+@router.get("/circuit-breaker/{strategy_id}")
+async def get_circuit_breaker_by_id(strategy_id: str):
+    """
+    Retorna el estado del circuit breaker de un bot específico.
+    """
+    status = circuit_breaker.get_status(strategy_id)
+    return status
+
+
+@router.post("/circuit-breaker/{strategy_id}/reset")
+async def reset_circuit_breaker(strategy_id: str):
+    """
+    Resetea manualmente el circuit breaker de un bot bloqueado.
+    Vuelve al estado CLOSED y reinicia los contadores de pérdida.
+    """
+    ok = circuit_breaker.manual_reset(strategy_id)
+    if not ok:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No se encontró estado de circuit breaker para '{strategy_id}'"
+        )
+    return {"status": "reset", "strategy_id": strategy_id, "new_state": "CLOSED"}

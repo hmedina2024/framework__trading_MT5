@@ -79,6 +79,8 @@ function navigateTo(page) {
         strategies:  'Estrategias Automáticas',
         positions:   'Posiciones',
         seguimiento: 'Seguimiento de Bots',
+        backtest: 'Backtest de Estrategias',
+        rendimiento: 'Rendimiento',
         settings:    'Configuración'
     };
     document.getElementById('pageTitle').textContent = titles[page] || page;
@@ -94,6 +96,8 @@ function loadCurrentPage() {
         case 'analysis':     break;
         case 'strategies':   loadStrategies(); break;
         case 'positions':    loadAllPositions(); break;
+        case 'backtest':    break; // carga bajo demanda
+        case 'rendimiento':  rendLoadChart(_rendDays || 30); break;
         case 'seguimiento':  if (typeof segRefresh === 'function') segRefresh(); break;
         case 'settings':     loadSettings(); break;
     }
@@ -203,9 +207,20 @@ async function loadAccountInfo() {
         document.getElementById('marginFree').textContent = formatCurrency(account.margin_free, account.currency);
         document.getElementById('accountLogin').textContent = account.login;
 
-        // Color del profit
+        // Color del profit — azul MT5 para positivo, rojo para negativo
         const profitEl = document.getElementById('profit');
-        profitEl.style.color = account.profit >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
+        if (account.profit > 0) {
+            profitEl.style.color = '#378ADD';
+            profitEl.style.fontWeight = '700';
+            profitEl.textContent = '+$' + account.profit.toFixed(2);
+        } else if (account.profit < 0) {
+            profitEl.style.color = '#E24B4A';
+            profitEl.style.fontWeight = '700';
+            profitEl.textContent = '-$' + Math.abs(account.profit).toFixed(2);
+        } else {
+            profitEl.style.color = 'var(--color-text-secondary)';
+            profitEl.style.fontWeight = '400';
+        }
     } catch (err) {
         console.warn('No se pudo cargar info de cuenta:', err.message);
     }
@@ -222,22 +237,38 @@ async function loadPositions() {
             return;
         }
 
-        tbody.innerHTML = positions.map(pos => `
-            <tr>
+        tbody.innerHTML = positions.map(pos => {
+            const isPositive  = pos.profit > 0;
+            const isNegative  = pos.profit < 0;
+            const pnlColor    = isPositive ? '#378ADD' : isNegative ? '#E24B4A' : 'var(--color-text-secondary)';
+            const pnlArrow    = isPositive ? '▲' : isNegative ? '▼' : '●';
+            const pnlSign     = isPositive ? '+' : '';
+            const typeColor   = pos.type === 'BUY' ? '#378ADD' : '#E24B4A';
+            const priceDiff   = pos.type === 'BUY'
+                ? (pos.price_current - pos.price_open)
+                : (pos.price_open - pos.price_current);
+            const pips        = (priceDiff / (pos.symbol.includes('JPY') ? 0.01 : 0.0001)).toFixed(1);
+            const pipsColor   = priceDiff >= 0 ? '#378ADD' : '#E24B4A';
+
+            return `
+            <tr style="transition: background 0.3s">
                 <td><strong>${pos.symbol}</strong></td>
-                <td class="type-${pos.type.toLowerCase()}">${pos.type}</td>
+                <td style="color:${typeColor};font-weight:600">${pos.type}</td>
                 <td>${pos.volume}</td>
-                <td>${pos.price_open}</td>
-                <td class="${pos.profit >= 0 ? 'profit-positive' : 'profit-negative'}">
-                    ${formatCurrency(pos.profit)}
+                <td style="font-size:12px">${pos.price_open}</td>
+                <td style="color:${pnlColor};font-weight:600;font-size:14px">
+                    ${pnlArrow} ${pnlSign}$${Math.abs(pos.profit).toFixed(2)}
+                    <div style="font-size:10px;color:${pipsColor};font-weight:400">
+                        ${priceDiff >= 0 ? '+' : ''}${pips} pips
+                    </div>
                 </td>
                 <td>
                     <button class="btn-icon" onclick="closePosition(${pos.ticket})" title="Cerrar posición">
                         <i class="fas fa-times"></i>
                     </button>
                 </td>
-            </tr>
-        `).join('');
+            </tr>`;
+        }).join('');
     } catch (err) {
         console.warn('No se pudo cargar posiciones:', err.message);
     }
@@ -285,13 +316,14 @@ async function updateWatchlistPrices() {
     for (const symbol of AppState.watchlist) {
         try {
             const data = await MarketAPI.getTicker(symbol);
-            const change = ((data.bid - data.ask) / data.ask * 100).toFixed(2);
+            const change = data.daily_change !== undefined ? data.daily_change : 0;
+            const digits = data.digits !== undefined ? data.digits : 5;
             items.push(`
                 <div class="watchlist-item" onclick="navigateTo('trading')">
                     <span class="watchlist-symbol">${symbol}</span>
-                    <span class="watchlist-price">${data.bid.toFixed(5)}</span>
+                    <span class="watchlist-price">${data.bid.toFixed(digits)}</span>
                     <span class="watchlist-change ${change >= 0 ? 'up' : 'down'}">
-                        ${change >= 0 ? '▲' : '▼'} ${Math.abs(change)}%
+                        ${change >= 0 ? '▲' : '▼'} ${Math.abs(change).toFixed(2)}%
                     </span>
                 </div>
             `);
@@ -785,26 +817,58 @@ async function loadAllPositions() {
             return;
         }
 
-        tbody.innerHTML = positions.map(pos => `
+        tbody.innerHTML = positions.map(pos => {
+            const isPositive = pos.profit > 0;
+            const isNegative = pos.profit < 0;
+            const pnlColor   = isPositive ? '#378ADD' : isNegative ? '#E24B4A' : 'var(--color-text-secondary)';
+            const pnlBg      = isPositive ? 'rgba(55,138,221,0.08)' : isNegative ? 'rgba(226,75,74,0.08)' : 'transparent';
+            const pnlArrow   = isPositive ? '▲' : isNegative ? '▼' : '●';
+            const pnlSign    = isPositive ? '+' : '';
+            const typeColor  = pos.type === 'BUY' ? '#378ADD' : '#E24B4A';
+            const typeBg     = pos.type === 'BUY' ? 'rgba(55,138,221,0.12)' : 'rgba(226,75,74,0.12)';
+            const priceDiff  = pos.type === 'BUY'
+                ? (pos.price_current - pos.price_open)
+                : (pos.price_open - pos.price_current);
+            const isJPY      = pos.symbol.includes('JPY');
+            const pipSize    = isJPY ? 0.01 : pos.symbol.includes('XAU') ? 0.1 : 0.0001;
+            const pips       = (priceDiff / pipSize).toFixed(1);
+            const pipsColor  = priceDiff >= 0 ? '#378ADD' : '#E24B4A';
+            const slDist     = pos.stop_loss
+                ? Math.abs(pos.price_current - pos.stop_loss).toFixed(pos.symbol.includes('JPY') ? 2 : 5)
+                : '--';
+            const tpDist     = pos.take_profit
+                ? Math.abs(pos.take_profit - pos.price_current).toFixed(pos.symbol.includes('JPY') ? 2 : 5)
+                : '--';
+
+            return `
             <tr>
-                <td>#${pos.ticket}</td>
+                <td style="font-size:11px;color:var(--color-text-secondary)">#${pos.ticket}</td>
                 <td><strong>${pos.symbol}</strong></td>
-                <td class="type-${pos.type.toLowerCase()}">${pos.type}</td>
+                <td>
+                    <span style="color:${typeColor};background:${typeBg};padding:2px 8px;border-radius:4px;font-weight:600;font-size:12px">
+                        ${pos.type}
+                    </span>
+                </td>
                 <td>${pos.volume}</td>
-                <td>${pos.price_open}</td>
-                <td>${pos.price_current}</td>
-                <td>${pos.stop_loss || '--'}</td>
-                <td>${pos.take_profit || '--'}</td>
-                <td class="${pos.profit >= 0 ? 'profit-positive' : 'profit-negative'}">
-                    ${formatCurrency(pos.profit)}
+                <td style="font-size:12px">${pos.price_open}</td>
+                <td style="font-weight:500">${pos.price_current}
+                    <div style="font-size:10px;color:${pipsColor}">${priceDiff >= 0 ? '+' : ''}${pips} pips</div>
+                </td>
+                <td style="font-size:12px;color:#E24B4A">${pos.stop_loss || '--'}</td>
+                <td style="font-size:12px;color:#378ADD">${pos.take_profit || '--'}</td>
+                <td style="background:${pnlBg};border-radius:6px;padding:4px 8px">
+                    <div style="color:${pnlColor};font-weight:700;font-size:15px">
+                        ${pnlArrow} ${pnlSign}$${Math.abs(pos.profit).toFixed(2)}
+                    </div>
                 </td>
                 <td>
-                    <button class="btn-icon" onclick="closePosition(${pos.ticket})" title="Cerrar">
+                    <button class="btn-icon" onclick="closePosition(${pos.ticket})" title="Cerrar"
+                        style="color:#E24B4A">
                         <i class="fas fa-times"></i>
                     </button>
                 </td>
-            </tr>
-        `).join('');
+            </tr>`;
+        }).join('');
     } catch (err) {
         console.warn('No se pudo cargar posiciones:', err.message);
     }
@@ -874,4 +938,351 @@ function formatCurrency(amount, currency = 'USD') {
     const formatted = Math.abs(amount).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     const sign = amount < 0 ? '-' : '';
     return `${sign}$${formatted}`;
+}
+
+// ============ SEGUIMIENTO — CARGA AUTOMÁTICA DESDE HISTORIAL MT5 ============
+
+/**
+ * Carga el historial de deals cerrados desde MT5 y calcula las métricas
+ * de seguimiento por estrategia + símbolo automáticamente.
+ * Fusiona con los registros manuales existentes sin duplicar.
+ */
+async function segLoadFromHistory(days = 30) {
+    const btn = document.getElementById('seg-btn-sync');
+    if (btn) { btn.disabled = true; btn.textContent = 'Sincronizando...'; }
+
+    try {
+        const data = await OrdersAPI.getHistory(days);
+        if (!data || !data.deals || data.deals.length === 0) {
+            showToast('No hay historial de trades en los últimos ' + days + ' días', 'info');
+            return;
+        }
+
+        // Agrupar deals por strategy + symbol
+        // El campo "strategy" viene resuelto desde el backend via magic number
+        // — nunca será "tp" ni "sl"
+        const groups = {};
+        for (const deal of data.deals) {
+            const strat = deal.strategy || 'DESCONOCIDA';
+            const key   = `${strat}_${deal.symbol}`;
+            if (!groups[key]) {
+                groups[key] = { symbol: deal.symbol, strat,
+                                wins: 0, losses: 0,
+                                totalWin: 0, totalLoss: 0, trades: 0,
+                                lastDate: deal.time };
+            }
+            const g = groups[key];
+            g.trades++;
+            const net = deal.profit + (deal.commission || 0) + (deal.swap || 0);
+            if (net >= 0) { g.wins++;   g.totalWin  += net; }
+            else          { g.losses++; g.totalLoss += Math.abs(net); }
+            if (deal.time > g.lastDate) g.lastDate = deal.time;
+        }
+
+        if (Object.keys(groups).length === 0) {
+            showToast('Historial encontrado pero sin trades cerrados aún', 'info');
+            return;
+        }
+
+        // Cargar registros existentes y agregar/actualizar
+        const existing = segLoad();
+        let added = 0, updated = 0;
+
+        for (const [key, g] of Object.entries(groups)) {
+            if (g.trades === 0) continue;
+            const avgWin  = g.wins   > 0 ? g.totalWin  / g.wins   : 0;
+            const avgLoss = g.losses > 0 ? g.totalLoss / g.losses : 0;
+            const fecha   = new Date(g.lastDate).toLocaleDateString('es-CO',
+                            { day: '2-digit', month: '2-digit', year: '2-digit' });
+
+            const idx = existing.findIndex(r => r.sym === g.symbol && r.strat === g.strat);
+            const entry = { strat: g.strat, sym: g.symbol, trades: g.trades,
+                            wins: g.wins, avgWin: parseFloat(avgWin.toFixed(2)),
+                            avgLoss: parseFloat(avgLoss.toFixed(2)),
+                            fase: 'Fase 1', fecha };
+
+            if (idx >= 0) { existing[idx] = entry; updated++; }
+            else          { existing.push(entry); added++; }
+        }
+
+        segSave(existing);
+        segRefresh();
+        showToast(
+            `Sincronizado: ${added} nuevos, ${updated} actualizados (${data.count} deals, ${days} días)`,
+            'success'
+        );
+    } catch (err) {
+        showToast('Error al sincronizar historial: ' + err.message, 'error');
+        console.error('segLoadFromHistory error:', err);
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = '⟳ Sincronizar MT5'; }
+    }
+}
+
+// ============================================================================
+// MÓDULO DE RENDIMIENTO — Equity Curve, Drawdown, P&L por estrategia
+// ============================================================================
+
+let _rendChartEquity   = null;
+let _rendChartStrategy = null;
+let _rendChartHourly   = null;
+let _rendDays          = 30;
+
+async function rendLoadChart(days = 30) {
+    _rendDays = days;
+
+    // Actualizar botones activos
+    ['7d','30d','90d'].forEach(d => {
+        const btn = document.getElementById(`rend-btn-${d}`);
+        if (btn) btn.classList.toggle('btn-active', `${days}d` === d ||
+            (days === 7 && d === '7d') || (days === 30 && d === '30d') || (days === 90 && d === '90d'));
+    });
+
+    try {
+        const data = await OrdersAPI.getHistory(days);
+        if (!data || !data.deals || data.deals.length === 0) {
+            rendShowEmpty();
+            return;
+        }
+
+        const deals = data.deals;
+
+        // --- Equity Curve ---
+        // Construir serie temporal: balance acumulado a lo largo del tiempo
+        const accountData = await AccountAPI.getInfo();
+        const currentBalance = accountData ? accountData.balance : 1000;
+
+        // Ordenar deals por tiempo
+        const sorted = [...deals].sort((a, b) => new Date(a.time) - new Date(b.time));
+
+        // Calcular P&L acumulado desde el pasado
+        let totalPnl = sorted.reduce((sum, d) => sum + (d.profit || 0) + (d.commission || 0) + (d.swap || 0), 0);
+        let runningBalance = currentBalance - totalPnl;
+
+        const equityLabels = [];
+        const equityValues = [];
+        let peak = runningBalance;
+        let maxDrawdown = 0;
+        const drawdownValues = [];
+
+        for (const deal of sorted) {
+            const net = (deal.profit || 0) + (deal.commission || 0) + (deal.swap || 0);
+            runningBalance += net;
+            const date = new Date(deal.time);
+            equityLabels.push(date.toLocaleDateString('es-CO', {month:'short', day:'numeric'}));
+            equityValues.push(parseFloat(runningBalance.toFixed(2)));
+
+            if (runningBalance > peak) peak = runningBalance;
+            const dd = peak > 0 ? ((peak - runningBalance) / peak * 100) : 0;
+            if (dd > maxDrawdown) maxDrawdown = dd;
+            drawdownValues.push(parseFloat(dd.toFixed(2)));
+        }
+
+        // Agregar punto actual
+        equityLabels.push('Ahora');
+        equityValues.push(parseFloat(currentBalance.toFixed(2)));
+
+        // Actualizar métricas
+        const startBalance = equityValues[0] || currentBalance;
+        const pnl = currentBalance - startBalance;
+        document.getElementById('rend-balance').textContent   = '$' + currentBalance.toFixed(2);
+        document.getElementById('rend-pnl').textContent       = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
+        document.getElementById('rend-pnl').style.color       = pnl >= 0 ? 'var(--success)' : 'var(--danger)';
+        document.getElementById('rend-drawdown').textContent  = maxDrawdown.toFixed(2) + '%';
+        document.getElementById('rend-trades').textContent    = deals.length;
+
+        // Renderizar Equity Chart
+        const ctxEq = document.getElementById('equityChart').getContext('2d');
+        if (_rendChartEquity) _rendChartEquity.destroy();
+        _rendChartEquity = new Chart(ctxEq, {
+            type: 'line',
+            data: {
+                labels: equityLabels,
+                datasets: [{
+                    label: 'Balance',
+                    data: equityValues,
+                    borderColor: '#3B6D11',
+                    backgroundColor: 'rgba(59,109,17,0.08)',
+                    borderWidth: 2,
+                    pointRadius: 2,
+                    fill: true,
+                    tension: 0.3
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: { ticks: { maxTicksLimit: 10, color: '#888' }, grid: { color: 'rgba(128,128,128,0.1)' } },
+                    y: { ticks: { color: '#888', callback: v => '$' + v.toFixed(0) }, grid: { color: 'rgba(128,128,128,0.1)' } }
+                }
+            }
+        });
+
+        // --- P&L por estrategia ---
+        const stratMap = {};
+        for (const deal of deals) {
+            const strat = deal.strategy || 'DESCONOCIDA';
+            if (!stratMap[strat]) stratMap[strat] = 0;
+            stratMap[strat] += (deal.profit || 0) + (deal.commission || 0) + (deal.swap || 0);
+        }
+        const stratLabels = Object.keys(stratMap).sort((a, b) => stratMap[b] - stratMap[a]);
+        const stratValues = stratLabels.map(s => parseFloat(stratMap[s].toFixed(2)));
+        const stratColors = stratValues.map(v => v >= 0 ? '#3B6D11' : '#A32D2D');
+
+        const ctxSt = document.getElementById('strategyPnlChart').getContext('2d');
+        if (_rendChartStrategy) _rendChartStrategy.destroy();
+        _rendChartStrategy = new Chart(ctxSt, {
+            type: 'bar',
+            data: {
+                labels: stratLabels,
+                datasets: [{ data: stratValues, backgroundColor: stratColors, borderRadius: 4 }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: { ticks: { color: '#888', font: { size: 11 } }, grid: { display: false } },
+                    y: { ticks: { color: '#888', callback: v => '$' + v.toFixed(0) }, grid: { color: 'rgba(128,128,128,0.1)' } }
+                }
+            }
+        });
+
+        // --- Trades por hora ---
+        const hourMap = new Array(24).fill(0);
+        const hourWins = new Array(24).fill(0);
+        for (const deal of deals) {
+            const h = new Date(deal.time).getUTCHours();
+            hourMap[h]++;
+            const net = (deal.profit || 0) + (deal.commission || 0) + (deal.swap || 0);
+            if (net >= 0) hourWins[h]++;
+        }
+
+        const ctxHr = document.getElementById('hourlyChart').getContext('2d');
+        if (_rendChartHourly) _rendChartHourly.destroy();
+        _rendChartHourly = new Chart(ctxHr, {
+            type: 'bar',
+            data: {
+                labels: Array.from({length:24}, (_,i) => `${i}h`),
+                datasets: [
+                    { label: 'Trades', data: hourMap, backgroundColor: 'rgba(55,138,221,0.5)', borderRadius: 3 },
+                    { label: 'Wins',   data: hourWins, backgroundColor: 'rgba(59,109,17,0.7)',  borderRadius: 3 }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: true, labels: { color: '#888', font: { size: 11 } } } },
+                scales: {
+                    x: { ticks: { color: '#888', font: { size: 10 }, maxRotation: 0 }, grid: { display: false } },
+                    y: { ticks: { color: '#888' }, grid: { color: 'rgba(128,128,128,0.1)' } }
+                }
+            }
+        });
+
+    } catch (err) {
+        console.error('rendLoadChart error:', err);
+        rendShowEmpty();
+    }
+}
+
+function rendShowEmpty() {
+    document.getElementById('rend-balance').textContent  = '--';
+    document.getElementById('rend-pnl').textContent      = '--';
+    document.getElementById('rend-drawdown').textContent = '--';
+    document.getElementById('rend-trades').textContent   = '0';
+}
+
+// ============================================================================
+// MÓDULO DE BACKTESTING
+// ============================================================================
+
+let _btChart = null;
+
+async function runBacktest() {
+    const symbol      = document.getElementById('bt-symbol').value;
+    const strategy    = document.getElementById('bt-strategy').value;
+    const days        = parseInt(document.getElementById('bt-days').value);
+    const balance     = parseFloat(document.getElementById('bt-balance').value) || 1000;
+    const riskPct     = parseFloat(document.getElementById('bt-risk').value) / 100 || 0.01;
+
+    const btnEl       = document.getElementById('bt-run-btn');
+    const resultsEl   = document.getElementById('bt-results');
+    const loadingEl   = document.getElementById('bt-loading');
+
+    btnEl.disabled    = true;
+    btnEl.textContent = '⏳ Ejecutando...';
+    resultsEl.style.display  = 'none';
+    loadingEl.style.display  = 'flex';
+
+    try {
+        const r = await StrategiesAPI.backtest(symbol, strategy, days, balance, riskPct);
+
+        loadingEl.style.display  = 'none';
+        resultsEl.style.display  = 'block';
+
+        const pnlColor = r.total_pnl >= 0 ? '#3B6D11' : '#A32D2D';
+        const metrics = [
+            { label: 'P&L total',      value: `${r.total_pnl >= 0 ? '+' : ''}$${r.total_pnl.toFixed(2)}`, color: pnlColor },
+            { label: 'Retorno',        value: `${r.total_pnl_pct >= 0 ? '+' : ''}${r.total_pnl_pct.toFixed(2)}%`, color: pnlColor },
+            { label: 'Win Rate',       value: `${r.win_rate.toFixed(1)}%`, color: r.win_rate >= 50 ? '#3B6D11' : '#A32D2D' },
+            { label: 'Trades',         value: r.trades },
+            { label: 'Profit Factor',  value: r.profit_factor.toFixed(2) },
+            { label: 'Max Drawdown',   value: `-${r.max_drawdown.toFixed(2)}%`, color: '#A32D2D' },
+            { label: 'Gan. promedio',  value: `+$${r.avg_win.toFixed(2)}`, color: '#3B6D11' },
+            { label: 'Pérd. promedio', value: `-$${r.avg_loss.toFixed(2)}`, color: '#A32D2D' },
+        ];
+
+        document.getElementById('bt-metrics').innerHTML = metrics.map(m => `
+            <div style="background:var(--color-background-secondary);padding:.7rem;border-radius:var(--border-radius-md)">
+                <div style="font-size:11px;color:var(--color-text-secondary)">${m.label}</div>
+                <div style="font-size:17px;font-weight:500;color:${m.color || 'var(--color-text-primary)'}">
+                    ${m.value}
+                </div>
+            </div>`).join('');
+
+        // Equity curve
+        if (r.equity_curve && r.equity_curve.length > 1) {
+            const ctx = document.getElementById('btEquityChart').getContext('2d');
+            if (_btChart) _btChart.destroy();
+            const balances = r.equity_curve.map(p => p.balance);
+            const colors   = balances.map(b => b >= balance ? '#3B6D11' : '#A32D2D');
+            _btChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: r.equity_curve.map((_, i) => i === 0 ? 'Inicio' : `T${i}`),
+                    datasets: [{
+                        data: balances,
+                        borderColor: r.total_pnl >= 0 ? '#3B6D11' : '#A32D2D',
+                        backgroundColor: r.total_pnl >= 0 ? 'rgba(59,109,17,0.08)' : 'rgba(163,45,45,0.08)',
+                        borderWidth: 2,
+                        pointRadius: 0,
+                        fill: true,
+                        tension: 0.3
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { display: false },
+                        y: { ticks: { color: '#888', callback: v => '$' + v.toFixed(0) },
+                             grid: { color: 'rgba(128,128,128,0.1)' } }
+                    }
+                }
+            });
+        }
+
+    } catch (err) {
+        loadingEl.style.display = 'none';
+        resultsEl.style.display = 'block';
+        document.getElementById('bt-metrics').innerHTML =
+            `<div style="color:var(--color-text-danger);grid-column:span 2">Error: ${err.message}</div>`;
+    } finally {
+        btnEl.disabled    = false;
+        btnEl.textContent = '▶ Ejecutar Backtest';
+    }
 }

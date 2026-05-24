@@ -13,6 +13,11 @@ from api.routers import account, market, orders, strategies, analysis
 from api.core.connection_manager import ConnectionManager
 from api.core.trading_service import TradingService
 from utils.logger import get_logger
+try:
+    from utils.telegram_notifier import alert_server_start
+    _TELEGRAM_OK = True
+except ImportError:
+    _TELEGRAM_OK = False
 
 logger = get_logger(__name__)
 
@@ -30,6 +35,27 @@ async def lifespan(app: FastAPI):
     success = await trading_service.initialize()
     if success:
         logger.info("✅ Servicio de trading inicializado correctamente")
+        # Auto-arranque: relanzar bots que estaban activos antes del reinicio
+        loop = asyncio.get_event_loop()
+        launched = await loop.run_in_executor(None, trading_service._load_bots_config)
+        if launched > 0:
+            logger.info(f"🤖 Auto-arranque: {launched} bots relanzados automáticamente")
+        else:
+            logger.info("🤖 Auto-arranque: sin bots previos configurados")
+
+        # Alerta Telegram de arranque
+        if _TELEGRAM_OK:
+            alert_server_start(launched)
+
+        # Iniciar scheduler de régimen de mercado
+        # Detecta el régimen (tendencia/lateral/volátil) y activa/desactiva
+        # bots automáticamente cada 4 horas y al abrir Londres (07:00 UTC)
+        if trading_service.regime_detector:
+            await loop.run_in_executor(
+                None,
+                trading_service.regime_detector.start_scheduler
+            )
+            logger.info("📈 RegimeDetector scheduler iniciado")
     else:
         logger.warning("⚠️ Servicio de trading no pudo conectar a MT5 al inicio")
     

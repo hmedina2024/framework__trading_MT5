@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException, Body
+from fastapi import APIRouter, Depends, HTTPException, Body, Query
 from api.core.trading_service import TradingService
 from models import Position, TradeRequest, TradeResult
-from typing import List
+from typing import List, Optional
+from datetime import datetime, timedelta
 
 router = APIRouter()
 
@@ -67,3 +68,32 @@ async def close_position(ticket: int, service: TradingService = Depends(get_trad
             detail=result.error_message or "Error desconocido al cerrar posición"
         )
     return {"status": "closed", "ticket": ticket, "price": result.price, "volume": result.volume}
+
+@router.get("/history")
+async def get_trade_history(
+    days: int = Query(default=30, ge=1, le=365, description="Dias de historial a consultar"),
+    symbol: Optional[str] = Query(default=None, description="Filtrar por simbolo"),
+    service: TradingService = Depends(get_trading_service)
+):
+    """
+    Retorna el historial de deals cerrados de MT5.
+    Usado por el modulo de Seguimiento para calcular metricas automaticamente.
+
+    Params:
+        days:   cuantos dias hacia atras consultar (default 30, max 365)
+        symbol: filtrar por simbolo especifico (opcional)
+    """
+    if not service.is_connected():
+        raise HTTPException(status_code=503, detail="MT5 no conectado")
+
+    try:
+        now       = datetime.now()
+        from_date = now - timedelta(days=days)
+        deals     = service.connector.get_trade_history(
+            from_date=from_date,
+            to_date=now,
+            symbol=symbol or None
+        )
+        return {"deals": deals, "count": len(deals), "days": days}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

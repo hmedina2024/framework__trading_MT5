@@ -134,14 +134,17 @@ class SupertrendStrategy(StrategyBase):
         # SL detras de la linea Supertrend + buffer de 0.5 ATR
         supertrend_val = signal['supertrend']
 
+        # Ajuste dinámico de SL según volatilidad del día
+        vol_mult = self._get_volatility_sl_multiplier(symbol)
+
         if signal['direction'] == 'BUY':
-            entry = market_data.ask
-            stop_loss = supertrend_val - (atr * 0.5)
-            take_profit = entry + (abs(entry - stop_loss) * 2.0)  # R:R 1:2
+            entry       = market_data.ask
+            stop_loss   = supertrend_val - (atr * 0.5 * vol_mult)
+            take_profit = entry + (abs(entry - stop_loss) * 2.0)
         else:
-            entry = market_data.bid
-            stop_loss = supertrend_val + (atr * 0.5)
-            take_profit = entry - (abs(stop_loss - entry) * 2.0)  # R:R 1:2
+            entry       = market_data.bid
+            stop_loss   = supertrend_val + (atr * 0.5 * vol_mult)
+            take_profit = entry - (abs(stop_loss - entry) * 2.0)
 
         entry      = symbol_info.normalize_price(entry)
         stop_loss  = symbol_info.normalize_price(stop_loss)

@@ -27,3 +27,79 @@ reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v Enab
 cd C:\Users\usuario\Desktop\MT5_trider
 venv\Scripts\activate
 python test_connection.py
+
+
+iniciar sesión:	61489485
+servidor:	mt5-demo01.pepperstone.com
+Apalancamiento:	1:200
+Divisa:	USD
+
+
+Cuenta 50K
+
+MT5_PATH=C:/Program Files/Pepperstone MetaTrader 5/terminal64.exe
+MT5_LOGIN=61489485
+MT5_PASSWORD=c4now&pVel
+MT5_SERVER=Pepperstone-Demo
+MT5_TIMEOUT=60000
+MT5_PORTABLE=False
+
+
+Cuenta 1K
+
+MT5_PATH=C:\\Program Files\\MetaTrader 5\\terminal64.exe
+MT5_LOGIN=61491149
+MT5_PASSWORD=Simulacion123**
+MT5_SERVER=Pepperstone-Demo
+MT5_TIMEOUT=60000
+MT5_PORTABLE=False
+
+
+Prueba2
+MT5_PATH=C:\\Program Files\\MetaTrader 5\\terminal64.exe
+MT5_LOGIN=61492733
+MT5_PASSWORD=Simulacion123%%
+MT5_SERVER=Pepperstone-Demo
+MT5_TIMEOUT=60000
+MT5_PORTABLE=False
+
+
+
+llave seguridad Ec2 Windows AWS Personal
+44.200.255.184
+Administrator
+TJfS8FqeocyQFent0MS7Gx&EowY7NOWD
+
+
+comando terminal de la MV
+C:\TradingApp\MT5_trider>
+
+python run_server.py
+
+
+BLOQUEO CONEXION REMOTA
+
+Ese error es de seguridad de Windows — bloqueó tu usuario por demasiados intentos fallidos de contraseña. Pasa frecuentemente cuando usas escritorio remoto.
+Solución desde la consola de AWS:
+
+Ve a AWS Console → EC2 → Instancias
+Selecciona tu instancia → clic en Conectar
+Usa EC2 Instance Connect o Session Manager para entrar sin contraseña
+Una vez dentro, abre PowerShell como administrador y ejecuta:
+
+powershell# Desbloquear el usuario (reemplaza "usuario" con tu nombre de usuario)
+net user usuario /active:yes
+
+# O si está bloqueado por intentos fallidos:
+net accounts /lockoutthreshold:0
+Si no tienes Session Manager configurado, otra opción es:
+
+En AWS Console ve a tu instancia
+Acciones → Monitoreo y solución de problemas → Obtener contraseña de Windows
+Usa tu key pair (.pem) para descifrar la contraseña
+Intenta conectarte con esa contraseña
+
+Para evitar que pase de nuevo, una vez que entres ejecuta esto en PowerShell:
+powershell# Deshabilitar bloqueo por intentos fallidos
+net accounts /lockoutthreshold:0
+¿Tienes acceso a Session Manager o al archivo .pem de tu instancia?

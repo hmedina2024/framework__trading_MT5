@@ -34,14 +34,19 @@ logger = get_logger(__name__)
 #   USDJPY                    (~150)    -> 0.02
 #   XAUUSD                    (~5000)   -> 0.5
 # ---------------------------------------------------------------------------
+# DEMO: umbrales reducidos al 50% para capturar mas senales y evaluar estrategia.
+# Produccion: EURUSD/GBPUSD/AUDUSD=0.0002, USDJPY=0.02, XAUUSD=0.5
 HISTOGRAM_MIN_THRESHOLD = {
-    'EURUSD': 0.0002,
-    'GBPUSD': 0.0002,
-    'AUDUSD': 0.0002,
-    'USDJPY': 0.02,
-    'XAUUSD': 0.5,
-    'XAGUSD': 0.05,
-    'DEFAULT': 0.0002,
+    'EURUSD': 0.0001,
+    'GBPUSD': 0.0001,
+    'AUDUSD': 0.0001,
+    'USDJPY': 0.01,
+    'XAUUSD': 0.15,
+    'USDCAD': 0.0001,
+    'US30':   5.0,
+    'BTCUSD': 10.0,
+    'XAGUSD': 0.02,
+    'DEFAULT': 0.0001,
 }
 
 
@@ -177,13 +182,16 @@ class MACDStrategy(StrategyBase):
         df['atr'] = self.market_analyzer.calculate_atr(df)
         atr = df['atr'].iloc[-1]
 
+        # Ajuste dinámico de SL según volatilidad del día
+        vol_mult = self._get_volatility_sl_multiplier(symbol)
+
         if signal['direction'] == 'BUY':
             entry = market_data.ask
-            stop_loss = entry - (atr * 2.0)
+            stop_loss   = entry - (atr * 2.0 * vol_mult)
             take_profit = entry + (atr * 3.0)
         else:
             entry = market_data.bid
-            stop_loss = entry + (atr * 2.0)
+            stop_loss   = entry + (atr * 2.0 * vol_mult)
             take_profit = entry - (atr * 3.0)
 
         entry = symbol_info.normalize_price(entry)
