@@ -265,6 +265,10 @@ class StrategyBase(ABC):
         # {symbol: context_dict} — se guarda cuando la señal pasa el filtro
         self._pending_signal_context: Dict[str, Dict] = {}
 
+        # Timestamp de la última vela cerrada que generó señal por símbolo.
+        # Evita re-procesar la misma señal en iteraciones dentro de la misma vela.
+        self._last_signal_candle: Dict[str, object] = {}
+
         logger.info(f"Estrategia '{name}' inicializada para {symbols}")
 
     # =======================================================================
@@ -1005,8 +1009,16 @@ class StrategyBase(ABC):
 
                 signal = self.analyze(symbol, df)
                 if signal:
-                    logger.info(f"Senal detectada para {symbol}: {signal}")
-                    self.execute_signal(symbol, signal, df=df)
+                    candle_time = df.index[-1]
+                    if self._last_signal_candle.get(symbol) == candle_time:
+                        logger.debug(
+                            f"{self.name} | {symbol}: señal ignorada — "
+                            f"misma vela ya procesada ({candle_time})"
+                        )
+                    else:
+                        self._last_signal_candle[symbol] = candle_time
+                        logger.info(f"Senal detectada para {symbol}: {signal}")
+                        self.execute_signal(symbol, signal, df=df)
 
                 self._check_open_positions(symbol)
 
