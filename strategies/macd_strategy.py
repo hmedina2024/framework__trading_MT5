@@ -121,7 +121,7 @@ class MACDStrategy(StrategyBase):
                 # Loguear solo si hay cruce (para no llenar el log en lateral)
                 if (previous['histogram'] < 0 < current['histogram'] or
                         previous['histogram'] > 0 > current['histogram']):
-                    logger.info(
+                    logger.debug(
                         f"{symbol}: cruce MACD rechazado por ruido — "
                         f"histograma {current['histogram']:.6f} < umbral {min_threshold}"
                     )

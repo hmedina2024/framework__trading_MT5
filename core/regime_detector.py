@@ -144,6 +144,7 @@ class RegimeDetector:
         self.trading_service = trading_service
         self._regimes: Dict[str, Dict] = {}
         self._last_update: Optional[datetime] = None
+        self._last_london_open_date: Optional[object] = None  # evita disparar 5x en 07:00-07:04
         self._running = False
         self._thread: Optional[threading.Thread] = None
         # {strategy_id: blocked_until_datetime} — bots pausados por bajo rendimiento
@@ -446,9 +447,11 @@ class RegimeDetector:
                 now_utc = datetime.now(timezone.utc)
                 should_update = False
 
-                # Apertura de Londres 07:00 UTC
+                # Apertura de Londres 07:00 UTC — solo una vez por día
                 if REGIME_UPDATE_AT_OPEN and now_utc.hour == 7 and now_utc.minute < 5:
-                    should_update = True
+                    if self._last_london_open_date != now_utc.date():
+                        should_update = True
+                        self._last_london_open_date = now_utc.date()
 
                 # Cada N horas
                 if self._last_update:
