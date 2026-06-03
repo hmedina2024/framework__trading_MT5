@@ -2,7 +2,11 @@
 API Principal del Framework de Trading MT5
 Servidor FastAPI con WebSockets para datos en tiempo real
 """
+from pathlib import Path
 from fastapi import FastAPI
+
+# Directorio raíz del proyecto (MT5_trider/) — independiente del cwd
+_BASE_DIR = Path(__file__).parent.parent
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -104,15 +108,16 @@ app.include_router(strategies.router, prefix="/api/v1/strategies", tags=["Strate
 app.include_router(analysis.router, prefix="/api/v1/analysis", tags=["Analysis"])
 
 
-# Montar archivos estáticos
-app.mount("/css", StaticFiles(directory="frontend/css"), name="css")
-app.mount("/js", StaticFiles(directory="frontend/js"), name="js")
+# Montar archivos estáticos con rutas absolutas para que funcione
+# sin importar desde qué directorio se ejecute el servidor.
+app.mount("/css", StaticFiles(directory=str(_BASE_DIR / "frontend" / "css")), name="css")
+app.mount("/js",  StaticFiles(directory=str(_BASE_DIR / "frontend" / "js")),  name="js")
 
 
 @app.get("/", tags=["Frontend"])
 async def root():
     """Servir la aplicación frontend"""
-    return FileResponse('frontend/index.html')
+    return FileResponse(str(_BASE_DIR / "frontend" / "index.html"))
 
 
 @app.get("/api_status", tags=["Health"])

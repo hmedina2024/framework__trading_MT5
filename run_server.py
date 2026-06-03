@@ -5,6 +5,11 @@ import uvicorn
 import os
 from dotenv import load_dotenv
 
+# Cambiar al directorio del script para que todas las rutas relativas
+# (frontend/, bots_config.json, stats_*.json, .env) funcionen correctamente
+# sin importar desde qué carpeta se ejecute el script.
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
 # Cargar variables de entorno
 load_dotenv()
 
