@@ -61,17 +61,17 @@ STRATEGIES_BY_REGIME = {
 
     # ADX 22-30 — tendencia moderada, la más común en Forex
     # EMA Cross y MACD son los más rentables en este rango (WR 60-75%)
-    # London ORB se activa aquí: el impulso del open requiere tendencia moderada
-    'TRENDING_MILD':    ['EMA_CROSS', 'MACD', 'LONDON_ORB'],
+    # London ORB y NY ORB se activan aquí: impulso del open con tendencia moderada
+    'TRENDING_MILD':    ['EMA_CROSS', 'MACD', 'LONDON_ORB', 'NY_ORB'],
 
     # ADX 30-45 — tendencia fuerte y sostenida
-    # Supertrend se activa aquí — requiere tendencia clara para funcionar
-    # London ORB también funciona bien con tendencia fuerte
-    'TRENDING_STRONG':  ['EMA_CROSS', 'MACD', 'SUPERTREND', 'LONDON_ORB'],
+    # Supertrend + FVG: tendencia clara genera FVGs limpios y de alta continuación
+    # NY ORB también funciona bien — el overlap Londres+NY tiene máximo volumen
+    'TRENDING_STRONG':  ['EMA_CROSS', 'MACD', 'SUPERTREND', 'FVG', 'NY_ORB'],
 
     # ADX > 45 — tendencia extrema (eventos macro, noticias de alto impacto)
-    # Breakout captura rupturas de rango, Supertrend sigue la tendencia
-    'TRENDING_EXTREME': ['BREAKOUT', 'SUPERTREND'],
+    # Breakout captura rupturas de rango, FVG captura retornos al desequilibrio
+    'TRENDING_EXTREME': ['BREAKOUT', 'FVG'],
 
     # Alta volatilidad sin dirección — spread alto, riesgo extremo
     'VOLATILE':         [],

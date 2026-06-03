@@ -16,6 +16,8 @@ from strategies import (
 from strategies.supertrend_strategy import SupertrendStrategy
 from strategies.ema_crossover_strategy import EMACrossoverStrategy
 from strategies.williams_r_strategy import WilliamsRStrategy
+from strategies.fair_value_gap_strategy import FairValueGapStrategy
+from strategies.ny_open_orb_strategy import NYOpenORBStrategy
 from models import TradeRequest, TradeResult, OrderType
 from utils import get_logger
 from core.regime_detector import RegimeDetector
@@ -191,6 +193,18 @@ class TradingService:
             "timeframe": "H1",
             "class": "LondonORBStrategy",
         },
+        "FVG": {
+            "name": "Fair Value Gap",
+            "description": "Opera retornos a zonas de desequilibrio institucional (FVG/imbalances). El precio tiende a regresar a llenar el gap antes de continuar. Ideal para XAUUSD y GBPUSD.",
+            "timeframe": "H1",
+            "class": "FairValueGapStrategy",
+        },
+        "NY_ORB": {
+            "name": "NY Open ORB",
+            "description": "Breakout del rango de las 2 primeras velas H1 del NY Open (13-15 UTC). Opera el overlap Londres+NY, el período de mayor volumen del día. Ideal para US30, XAUUSD y GBPUSD.",
+            "timeframe": "H1",
+            "class": "NYOpenORBStrategy",
+        },
     }
 
     def _save_bots_config(self) -> None:
@@ -302,6 +316,8 @@ class TradingService:
                 'EMA_CROSS':  270000,
                 'WILLIAMS_R': 280000,
                 'LONDON_ORB': 300000,
+                'FVG':        310000,
+                'NY_ORB':     320000,
             }
             SYMBOL_OFFSET = {
                 'EURUSD': 1, 'GBPUSD': 2, 'USDJPY': 3, 'XAUUSD': 4,
@@ -355,6 +371,14 @@ class TradingService:
                 )
             elif strategy_type == "LONDON_ORB":
                 strategy = LondonORBStrategy(
+                    **common_args, timeframe=mt5.TIMEFRAME_H1
+                )
+            elif strategy_type == "FVG":
+                strategy = FairValueGapStrategy(
+                    **common_args, timeframe=mt5.TIMEFRAME_H1
+                )
+            elif strategy_type == "NY_ORB":
+                strategy = NYOpenORBStrategy(
                     **common_args, timeframe=mt5.TIMEFRAME_H1
                 )
             else:

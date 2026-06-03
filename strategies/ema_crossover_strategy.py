@@ -84,8 +84,45 @@ class EMACrossoverStrategy(StrategyBase):
             ema_trend_slope_up   = current['ema_trend'] > ema_trend_prev
             ema_trend_slope_down = current['ema_trend'] < ema_trend_prev
 
+            # Filtro de volumen relativo: la vela de cruce debe tener volumen
+            # >= 70% del promedio de las últimas 20 velas. Evita entrar en cruces
+            # generados por movimientos de baja convicción (spread, ruido de cierre).
+            vol_current = df['tick_volume'].iloc[-2]  # vela del cruce (la anterior)
+            vol_avg20   = df['tick_volume'].iloc[-21:-1].mean()
+            if vol_avg20 > 0 and vol_current < vol_avg20 * 0.70:
+                logger.debug(
+                    f"EMA Crossover {symbol}: cruce ignorado por bajo volumen "
+                    f"({vol_current:.0f} < {vol_avg20 * 0.70:.0f} — 70% avg)"
+                )
+                return None
+
+            # Filtro de divergencia RSI: bloquea cruces donde el precio hace
+            # nuevo máximo/mínimo pero el RSI no confirma (señal de agotamiento).
+            rsi = self.market_analyzer.calculate_rsi(df, period=14)
+            rsi_ok_buy  = True
+            rsi_ok_sell = True
+            if rsi is not None and not rsi.isna().iloc[-3:].any():
+                # Divergencia bajista: precio sube pero RSI baja (en últimas 5 velas)
+                price_high_now  = df['high'].iloc[-1]
+                price_high_prev = df['high'].iloc[-6:-1].max()
+                rsi_now         = rsi.iloc[-1]
+                rsi_prev        = rsi.iloc[-6:-1].max()
+                if price_high_now > price_high_prev and rsi_now < rsi_prev - 3:
+                    rsi_ok_buy = False
+                    logger.debug(f"EMA {symbol}: divergencia bajista RSI — cruce BUY ignorado")
+
+                # Divergencia alcista: precio baja pero RSI sube (en últimas 5 velas)
+                price_low_now  = df['low'].iloc[-1]
+                price_low_prev = df['low'].iloc[-6:-1].min()
+                rsi_low_now    = rsi.iloc[-1]
+                rsi_low_prev   = rsi.iloc[-6:-1].min()
+                if price_low_now < price_low_prev and rsi_low_now > rsi_low_prev + 3:
+                    rsi_ok_sell = False
+                    logger.debug(f"EMA {symbol}: divergencia alcista RSI — cruce SELL ignorado")
+
             # Senal de COMPRA: cruce dorado (fast cruza sobre slow)
-            if (previous['ema_fast'] <= previous['ema_slow'] and
+            if (rsi_ok_buy and
+                    previous['ema_fast'] <= previous['ema_slow'] and
                     current['ema_fast'] > current['ema_slow'] and
                     current['close'] > current['ema_trend'] and
                     ema_trend_slope_up):
@@ -107,7 +144,8 @@ class EMACrossoverStrategy(StrategyBase):
                 }
 
             # Senal de VENTA: cruce de muerte (fast cruza bajo slow)
-            elif (previous['ema_fast'] >= previous['ema_slow'] and
+            elif (rsi_ok_sell and
+                  previous['ema_fast'] >= previous['ema_slow'] and
                   current['ema_fast'] < current['ema_slow'] and
                   current['close'] < current['ema_trend'] and
                   ema_trend_slope_down):

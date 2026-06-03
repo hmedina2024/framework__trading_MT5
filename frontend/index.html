@@ -831,7 +831,8 @@
     const STRAT_LABELS = {
         MA_CROSS:'MA Cross + RSI', RSI:'RSI', BOLLINGER:'Bollinger Bands',
         MACD:'MACD', BREAKOUT:'Breakout', SUPERTREND:'Supertrend',
-        EMA_CROSS:'EMA Crossover', WILLIAMS_R:'Williams %R'
+        EMA_CROSS:'EMA Crossover', WILLIAMS_R:'Williams %R',
+        FVG:'Fair Value Gap', NY_ORB:'NY Open ORB'
     };
 
     function segLoad() {
@@ -843,10 +844,11 @@
 
     function segStatusBadge(row) {
         const wr = row.trades > 0 ? row.wins / row.trades : 0;
-        const rr = row.avgLoss > 0 ? row.avgWin / row.avgLoss : 0;
+        // null cuando no hay datos suficientes de ambos lados (no penalizar bots 100% win)
+        const rr = (row.avgWin > 0 && row.avgLoss > 0) ? row.avgWin / row.avgLoss : null;
         if (row.trades < 10) return '<span style="background:#E6F1FB;color:#185FA5;font-size:10px;padding:2px 8px;border-radius:4px;font-weight:500;">En prueba</span>';
-        if (wr >= 0.5 && rr >= 1.2) return '<span style="background:#EAF3DE;color:#3B6D11;font-size:10px;padding:2px 8px;border-radius:4px;font-weight:500;">Escalar</span>';
-        if (wr < 0.4 || rr < 0.8)  return '<span style="background:#FCEBEB;color:#A32D2D;font-size:10px;padding:2px 8px;border-radius:4px;font-weight:500;">Detener</span>';
+        if (wr >= 0.5 && (rr === null || rr >= 1.2)) return '<span style="background:#EAF3DE;color:#3B6D11;font-size:10px;padding:2px 8px;border-radius:4px;font-weight:500;">Escalar</span>';
+        if (wr < 0.4 || (rr !== null && rr < 0.8))  return '<span style="background:#FCEBEB;color:#A32D2D;font-size:10px;padding:2px 8px;border-radius:4px;font-weight:500;">Detener</span>';
         return '<span style="background:#FAEEDA;color:#854F0B;font-size:10px;padding:2px 8px;border-radius:4px;font-weight:500;">Observar</span>';
     }
 
@@ -860,7 +862,7 @@
         tbody.innerHTML = rows.map((r, i) => {
             const losses = r.trades - r.wins;
             const wr = r.trades > 0 ? ((r.wins / r.trades) * 100).toFixed(1) : '0.0';
-            const rr = r.avgLoss > 0 ? (r.avgWin / r.avgLoss).toFixed(2) : '--';
+            const rr = (r.avgWin > 0 && r.avgLoss > 0) ? (r.avgWin / r.avgLoss).toFixed(2) : '--';
             const pnl = (r.wins * r.avgWin) - (losses * r.avgLoss);
             const pnlColor = pnl >= 0 ? '#3B6D11' : '#A32D2D';
             const wrColor = parseFloat(wr) >= 50 ? '#3B6D11' : parseFloat(wr) >= 40 ? '#854F0B' : '#A32D2D';
@@ -989,7 +991,7 @@
         const lines = rows.map(r => {
             const losses = r.trades - r.wins;
             const wr = r.trades > 0 ? ((r.wins / r.trades) * 100).toFixed(1) : '0.0';
-            const rr = r.avgLoss > 0 ? (r.avgWin / r.avgLoss).toFixed(2) : '0';
+            const rr = (r.avgWin > 0 && r.avgLoss > 0) ? (r.avgWin / r.avgLoss).toFixed(2) : '--';
             const pnl = ((r.wins * r.avgWin) - (losses * r.avgLoss)).toFixed(2);
             return [r.fecha, STRAT_LABELS[r.strat]||r.strat, r.sym, r.trades, r.wins, losses, wr, r.avgWin.toFixed(2), r.avgLoss.toFixed(2), rr, pnl, r.fase].join(',');
         });
