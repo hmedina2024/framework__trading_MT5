@@ -1124,8 +1124,9 @@ class StrategyBase(ABC):
                         _symbol         = symbol
                         _direction      = info.get('type', '?')
                         _ticket         = ticket
+                        _last_profit    = info.get('last_profit')  # fallback flotante
 
-                        def _send_sltp_alert(strat, sym, direc, tkt):
+                        def _send_sltp_alert(strat, sym, direc, tkt, fallback_profit):
                             import MetaTrader5 as mt5
                             import time as _time
                             from datetime import timedelta, datetime as _dt
@@ -1133,14 +1134,14 @@ class StrategyBase(ABC):
                             profit = None
                             reason = 'SL/TP'
 
-                            # Reintentar hasta 10 veces con 2 segundos entre intentos
-                            # = hasta 20 segundos de espera total para que MT5 registre el deal
-                            for attempt in range(10):
-                                _time.sleep(2)  # esperar siempre, incluso en el primer intento
+                            # Reintentar hasta 20 veces con 3 segundos = 60 segundos máximo
+                            for attempt in range(20):
+                                _time.sleep(3)
                                 try:
                                     now   = _dt.now()
+                                    # Ventana de 4 horas para cubrir cualquier latencia de demo
                                     deals = mt5.history_deals_get(
-                                        now - timedelta(minutes=60), now
+                                        now - timedelta(hours=4), now
                                     )
                                     if not deals:
                                         continue
@@ -1167,15 +1168,21 @@ class StrategyBase(ABC):
                                 except Exception:
                                     pass  # reintentar
 
-                            # Si después de 20 segundos no lo encontramos,
-                            # intentar obtener el profit de la posicion cerrada
-                            # comparando balance antes/después (aproximado)
+                            # Fallback: usar último profit flotante registrado (máx 60s de retraso)
                             if profit is None:
-                                profit = 0.0
-                                logger.warning(
-                                    f"No se encontro deal para ticket={tkt} "
-                                    f"después de 20s — enviando con profit desconocido"
-                                )
+                                if fallback_profit is not None:
+                                    profit = fallback_profit
+                                    reason = ('TP' if profit >= 0 else 'SL') + ' (~aprox)'
+                                    logger.warning(
+                                        f"Deal no encontrado para ticket={tkt} tras 60s — "
+                                        f"usando último P&L flotante: {profit:.2f}"
+                                    )
+                                else:
+                                    profit = 0.0
+                                    logger.warning(
+                                        f"No se encontro deal para ticket={tkt} "
+                                        f"tras 60s y sin fallback flotante"
+                                    )
 
                             logger.info(
                                 f"Alerta SL/TP {sym} ticket={tkt}: "
@@ -1192,7 +1199,7 @@ class StrategyBase(ABC):
                         import threading as _th
                         _th.Thread(
                             target=_send_sltp_alert,
-                            args=(_strategy_name, _symbol, _direction, _ticket),
+                            args=(_strategy_name, _symbol, _direction, _ticket, _last_profit),
                             daemon=True
                         ).start()
 
@@ -1205,12 +1212,16 @@ class StrategyBase(ABC):
             if position.magic_number != self.magic_number:
                 continue
 
-            # Registrar como posicion conocida
+            # Registrar como posicion conocida y actualizar profit flotante
             if position.ticket not in self._known_positions:
                 self._known_positions[position.ticket] = {
                     'symbol': position.symbol,
                     'type':   position.type,
                 }
+            # Guardar último profit flotante como fallback para notificaciones SL/TP
+            self._known_positions[position.ticket]['last_profit'] = (
+                position.profit + getattr(position, 'swap', 0.0) + getattr(position, 'commission', 0.0)
+            )
 
             # Guard edad minima
             if not self._is_position_old_enough(position.ticket):
