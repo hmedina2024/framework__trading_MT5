@@ -251,7 +251,7 @@ class LondonORBStrategy(StrategyBase):
             adx = self.market_analyzer.calculate_adx(df, period=14)
             if adx is None or adx < params['adx_min']:
                 logger.debug(
-                    f"London ORB {symbol}: ADX={adx:.1f if adx else 'N/A'} "
+                    f"London ORB {symbol}: ADX={f'{adx:.1f}' if adx is not None else 'N/A'} "
                     f"< minimo {params['adx_min']} — sin momentum suficiente"
                 )
                 return None
