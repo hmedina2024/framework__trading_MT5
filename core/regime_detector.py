@@ -56,8 +56,9 @@ STRATEGIES_BY_REGIME = {
     'RANGING_PURE':     ['BOLLINGER', 'WILLIAMS_R', 'RSI'],
 
     # ADX 18-22 — lateral con ligera direccionalidad
-    # Williams %R más fiable que Bollinger, MA Cross captura mini-tendencias
-    'RANGING_MILD':     ['WILLIAMS_R', 'MA_CROSS', 'RSI'],
+    # Williams %R y RSI detectan reversiones; MA Cross se excluye porque genera
+    # whipsaws en mercados sin tendencia (confirmado: 0% WR en datos reales)
+    'RANGING_MILD':     ['WILLIAMS_R', 'RSI'],
 
     # ADX 22-30 — tendencia moderada, la más común en Forex
     # EMA Cross y MACD son los más rentables en este rango (WR 60-75%)

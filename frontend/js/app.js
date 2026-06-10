@@ -17,11 +17,11 @@ const AppState = {
     _refreshTick: 0,
 };
 
-// Frecuencia de actualización por tipo de dato (en ciclos de 3s)
+// Frecuencia de actualización por tipo de dato (en ciclos de 5s)
 const REFRESH_RATES = {
-    prices:     1,   // cada 3s  — precios y watchlist
-    positions:  3,   // cada 9s  — posiciones abiertas
-    account:    10,  // cada 30s — balance, bots
+    prices:     1,   // cada 5s  — precios y watchlist
+    positions:  3,   // cada 15s — posiciones abiertas
+    account:    12,  // cada 60s — balance, bots
 };
 
 // Mapa de timeframe (minutos) a nombre MT5
@@ -133,7 +133,7 @@ function startAutoRefresh() {
             if (page === 'dashboard' || page === 'strategies')  loadStrategiesStatus();
             if (page === 'strategies') loadStrategies();
         }
-    }, 3000);
+    }, 5000);
 }
 
 // ============ HEALTH CHECK ============
