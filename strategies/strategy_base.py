@@ -77,6 +77,21 @@ TRAILING_ACTIVATION_ATR = 1.0   # activar cuando ganancia >= 1x ATR
 TRAILING_STOP_ATR       = 1.0   # SL se coloca a 1x ATR del precio actual
 
 # ---------------------------------------------------------------------------
+# Take-profit parcial + breakeven
+# Cuando la posicion alcanza PARTIAL_TP_ACTIVATION_R veces el riesgo inicial (1R
+# = distancia entrada→SL original), se cierra una fraccion del volumen para
+# asegurar ganancia y se mueve el SL a breakeven (precio de entrada). El resto
+# de la posicion corre sin riesgo, gestionado por el trailing stop.
+# Beneficio: convierte muchos trades en "free trades" y reduce el drawdown.
+# Si la posicion es demasiado pequeña para dividirse (volumen restante < minimo),
+# solo se mueve el SL a breakeven sin cerrar nada.
+# ---------------------------------------------------------------------------
+PARTIAL_TP_ENABLED        = True
+PARTIAL_TP_ACTIVATION_R   = 1.0    # activar al alcanzar 1x el riesgo inicial
+PARTIAL_TP_CLOSE_FRACTION = 0.5    # cerrar 50% del volumen
+BREAKEVEN_ON_PARTIAL      = True   # mover SL a breakeven tras el cierre parcial
+
+# ---------------------------------------------------------------------------
 # Filtro de sesion de trading
 # Solo opera durante las sesiones de mayor liquidez (hora del servidor UTC+2)
 # Sesion Londres:    07:00 - 16:00 UTC  = 09:00 - 18:00 UTC+2
@@ -87,6 +102,12 @@ TRAILING_STOP_ATR       = 1.0   # SL se coloca a 1x ATR del precio actual
 TRADING_SESSION_FILTER  = True   # False = operar 24h (modo sin restriccion)
 SESSION_START_UTC       = 7      # hora UTC de inicio (apertura Londres)
 SESSION_END_UTC         = 20     # hora UTC de cierre (cierre NY)
+
+# Símbolos que operan 24/7 y NO deben restringirse al horario Londres+NY.
+# Las criptos tienen liquidez y movimientos fuertes también en sesión asiática,
+# por lo que aplicarles el filtro Forex deja fuera ~11h/día sin razón.
+# Se evalúa por substring para cubrir variantes del bróker (BTCUSD, ETHUSD, BTCUSD.r, etc.)
+SESSION_24H_SYMBOLS = ('BTC', 'ETH', 'LTC', 'XRP', 'DOGE', 'SOL', 'BNB', 'ADA')
 
 # ---------------------------------------------------------------------------
 # Filtro de correlación entre pares
@@ -248,6 +269,9 @@ class StrategyBase(ABC):
         # Trailing stop: SL maximo registrado por ticket {ticket: float}
         self._trailing_sl: Dict[int, float] = {}
 
+        # TP parcial ya ejecutado por ticket {ticket: True} — evita repetir el cierre
+        self._partial_tp_done: Dict[int, bool] = {}
+
         # Tracking de posiciones conocidas para detectar cierres por SL/TP de MT5
         # {ticket: {'symbol': str, 'type': str}}
         self._known_positions: Dict[int, Dict] = {}
@@ -336,15 +360,22 @@ class StrategyBase(ABC):
             return True
         return False
 
-    def _is_trading_session(self) -> bool:
+    def _is_trading_session(self, symbol: Optional[str] = None) -> bool:
         """
         Verifica si el mercado esta en horario de sesion activa.
         Basado en UTC para ser independiente de la zona horaria del servidor.
         Solo permite operar entre SESSION_START_UTC y SESSION_END_UTC.
         Fuera de ese rango (sesion asiatica principalmente) bloquea nuevas entradas.
         Las posiciones ya abiertas NO se cierran — solo se bloquean nuevas entradas.
+
+        Excepción: los símbolos en SESSION_24H_SYMBOLS (criptos) operan 24/7 y
+        no se restringen al horario Forex.
         """
         if not TRADING_SESSION_FILTER:
+            return True
+
+        # Criptos y otros activos 24/7 no aplican el filtro de sesión Forex
+        if symbol and any(token in symbol.upper() for token in SESSION_24H_SYMBOLS):
             return True
 
         from datetime import timezone
@@ -814,7 +845,8 @@ class StrategyBase(ABC):
                     return False
 
             # 0. Filtro de sesion — no abrir nuevas posiciones fuera de horario
-            if not self._is_trading_session():
+            # (las criptos quedan exentas: operan 24/7)
+            if not self._is_trading_session(symbol):
                 return False
 
             # 0b. Filtro de correlacion — evita doble exposicion al mismo par USD
@@ -1032,6 +1064,93 @@ class StrategyBase(ABC):
         positions = self.connector.get_positions(symbol)
         return any(p.magic_number == self.magic_number for p in positions)
 
+    def _check_partial_take_profit(self, position) -> None:
+        """
+        Cierra una fracción del volumen al alcanzar PARTIAL_TP_ACTIVATION_R veces
+        el riesgo inicial (R = distancia entrada→SL original) y mueve el SL a
+        breakeven. Convierte la operación en "free trade": el resto corre sin
+        riesgo. Se ejecuta una sola vez por ticket.
+
+        Si la posición es demasiado pequeña para dividirse (cualquiera de las dos
+        partes quedaría bajo el volumen mínimo del símbolo), solo se mueve el SL
+        a breakeven sin cerrar volumen.
+        """
+        if not PARTIAL_TP_ENABLED:
+            return
+        if self._partial_tp_done.get(position.ticket):
+            return
+
+        info      = self._known_positions.get(position.ticket, {})
+        risk_dist = info.get('risk_dist')
+        if not risk_dist or risk_dist <= 0:
+            return  # sin riesgo inicial registrado — no se puede calcular R
+
+        try:
+            market_data = self.connector.get_market_data(position.symbol)
+            symbol_info = self.connector.get_symbol_info(position.symbol)
+            if not market_data or not symbol_info:
+                return
+
+            current_price = market_data.bid if position.type == "BUY" else market_data.ask
+            if position.type == "BUY":
+                profit_dist = current_price - position.price_open
+            else:
+                profit_dist = position.price_open - current_price
+
+            # Activar solo al alcanzar N veces el riesgo inicial
+            if profit_dist < risk_dist * PARTIAL_TP_ACTIVATION_R:
+                return
+
+            close_volume = symbol_info.normalize_volume(
+                position.volume * PARTIAL_TP_CLOSE_FRACTION
+            )
+            remaining = round(position.volume - close_volume, 8)
+            can_split = (
+                close_volume >= symbol_info.volume_min and
+                remaining   >= symbol_info.volume_min
+            )
+
+            if can_split:
+                result = self.order_manager.close_position(
+                    position.ticket, volume=close_volume
+                )
+                if not result.success:
+                    logger.warning(
+                        f"TP parcial falló | {position.symbol} ticket={position.ticket}: "
+                        f"{result.error_message}"
+                    )
+                    return
+                logger.info(
+                    f"TP parcial | {position.symbol} {position.type} "
+                    f"ticket={position.ticket} | cerrado {close_volume} de "
+                    f"{position.volume} a {PARTIAL_TP_ACTIVATION_R:.1f}R | "
+                    f"restante {remaining} protegido en breakeven"
+                )
+            else:
+                logger.info(
+                    f"Posición {position.symbol} ticket={position.ticket} muy pequeña "
+                    f"para dividir (vol={position.volume}) — solo se mueve SL a breakeven"
+                )
+
+            # Mover SL a breakeven para asegurar la parte restante sin riesgo
+            if BREAKEVEN_ON_PARTIAL:
+                breakeven_sl = symbol_info.normalize_price(position.price_open)
+                mod = self.order_manager.modify_position(
+                    position.ticket, stop_loss=breakeven_sl
+                )
+                if mod.success:
+                    logger.info(
+                        f"SL a breakeven | {position.symbol} ticket={position.ticket} "
+                        f"→ {breakeven_sl:.5f}"
+                    )
+
+            self._partial_tp_done[position.ticket] = True
+
+        except Exception as e:
+            logger.error(
+                f"Error en TP parcial para ticket {position.ticket}: {e}"
+            )
+
     def _update_trailing_stop(self, position) -> None:
         """
         Mueve el Stop Loss hacia la ganancia cuando el precio avanza a favor.
@@ -1207,6 +1326,8 @@ class StrategyBase(ABC):
                         logger.debug(f"Telegram SL/TP alert error: {e}")
                 # Remover de posiciones conocidas
                 self._known_positions.pop(ticket, None)
+                self._partial_tp_done.pop(ticket, None)
+                self._trailing_sl.pop(ticket, None)
 
         for position in positions:
             if position.magic_number != self.magic_number:
@@ -1214,9 +1335,14 @@ class StrategyBase(ABC):
 
             # Registrar como posicion conocida y actualizar profit flotante
             if position.ticket not in self._known_positions:
+                # Capturar el riesgo inicial (distancia entrada→SL) para el TP parcial.
+                # En la primera vista el SL aún es el original (trailing no lo ha movido).
+                initial_sl = position.stop_loss or 0
+                risk_dist  = abs(position.price_open - initial_sl) if initial_sl else 0.0
                 self._known_positions[position.ticket] = {
-                    'symbol': position.symbol,
-                    'type':   position.type,
+                    'symbol':    position.symbol,
+                    'type':      position.type,
+                    'risk_dist': risk_dist,
                 }
             # Guardar último profit flotante como fallback para notificaciones SL/TP
             self._known_positions[position.ticket]['last_profit'] = (
@@ -1226,6 +1352,10 @@ class StrategyBase(ABC):
             # Guard edad minima
             if not self._is_position_old_enough(position.ticket):
                 continue
+
+            # Take-profit parcial + breakeven al alcanzar 1R (antes del trailing,
+            # para que el trailing solo mejore por encima del breakeven ya fijado)
+            self._check_partial_take_profit(position)
 
             # Trailing stop
             self._update_trailing_stop(position)
@@ -1322,6 +1452,8 @@ class StrategyBase(ABC):
 
         # Limpiar de posiciones conocidas (evita doble alerta si el bot también detecta el cierre)
         self._known_positions.pop(position.ticket, None)
+        self._partial_tp_done.pop(position.ticket, None)
+        self._trailing_sl.pop(position.ticket, None)
 
         # Alerta Telegram
         if _TELEGRAM_AVAILABLE:
