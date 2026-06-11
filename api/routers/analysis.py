@@ -26,3 +26,18 @@ async def get_full_analysis(symbol: str, service: TradingService = Depends(get_t
         "indicators": analysis["indicators"],
         "support_resistance": analysis["levels"]
     }
+
+
+@router.get("/ml-status")
+async def get_ml_status():
+    """
+    Estado del filtro de señales con ML (SignalFilter).
+    Permite monitorear desde /docs o el frontend si el modelo LightGBM ya se
+    activó, cuántas muestras etiquetadas tiene, cuántas faltan para entrenar,
+    el win rate de las muestras y la importancia de cada feature.
+    """
+    try:
+        from core.signal_filter import signal_filter
+        return signal_filter.get_status()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error obteniendo estado ML: {e}")

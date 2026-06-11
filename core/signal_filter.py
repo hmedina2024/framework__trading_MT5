@@ -39,6 +39,13 @@ CONFIDENCE_THRESHOLD = 0.42     # bloquear si P(ganancia) < 42%
 DATA_FILE  = Path("signal_filter_data.json")
 MODEL_FILE = Path("signal_filter_model.pkl")
 
+# Nombres de las features en el orden que produce _extract_feature_vector.
+# Se usa para reportar la importancia de cada feature en get_status().
+FEATURE_NAMES = [
+    'adx', 'atr_ratio', 'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos',
+    'spread_ratio', 'win_rate', 'direction_enc', 'bb_width_ratio',
+]
+
 # LightGBM es opcional — si no está instalado, el filtro funciona en modo heurístico
 try:
     import lightgbm as lgb
@@ -102,6 +109,65 @@ class SignalFilter:
                 except Exception as e:
                     logger.debug(f"SignalFilter ML error: {e} — usando heurísticas")
             return self._score_heuristic(context)
+
+    def get_status(self) -> Dict:
+        """
+        Snapshot del estado del filtro para monitoreo (endpoint /analysis/ml-status).
+        Reporta cuántas muestras etiquetadas hay, si el modelo LightGBM está activo,
+        cuántas faltan para entrenar y la importancia de cada feature si hay modelo.
+        """
+        with self._data_lock:
+            labeled = [s for s in self._samples if s.get('outcome') is not None]
+            labeled_count = len(labeled)
+            wins   = sum(1 for s in labeled if s.get('outcome') == 1)
+            losses = labeled_count - wins
+
+            # Desglose por bot (strategy_id)
+            by_strategy: Dict[str, Dict[str, int]] = {}
+            for s in labeled:
+                sid = s.get('strategy_id', 'desconocido')
+                bucket = by_strategy.setdefault(sid, {'wins': 0, 'losses': 0})
+                if s.get('outcome') == 1:
+                    bucket['wins'] += 1
+                else:
+                    bucket['losses'] += 1
+
+            last_ts = labeled[-1].get('ts') if labeled else None
+
+            # Importancia de features (solo si el modelo está entrenado)
+            feature_importance = None
+            if self._model is not None and _LGB_AVAILABLE:
+                try:
+                    importances = self._model.feature_importances_
+                    feature_importance = {
+                        name: int(imp)
+                        for name, imp in zip(FEATURE_NAMES, importances)
+                    }
+                except Exception:
+                    feature_importance = None
+
+            mode = 'LightGBM' if (self._model is not None and _LGB_AVAILABLE) else 'heurístico'
+
+            return {
+                'initialized':            self._initialized,
+                'mode':                   mode,
+                'model_active':           self._model is not None,
+                'lightgbm_available':     _LGB_AVAILABLE,
+                'model_file_exists':      MODEL_FILE.exists(),
+                'labeled_samples':        labeled_count,
+                'total_samples':          len(self._samples),
+                'wins':                   wins,
+                'losses':                 losses,
+                'win_rate':               round(wins / labeled_count, 4) if labeled_count else None,
+                'min_samples_to_train':   MIN_SAMPLES_TO_TRAIN,
+                'samples_until_activation': max(0, MIN_SAMPLES_TO_TRAIN - labeled_count),
+                'samples_at_last_train':  self._samples_at_last_train,
+                'retrain_interval':       RE_TRAIN_INTERVAL,
+                'confidence_threshold':   CONFIDENCE_THRESHOLD,
+                'last_sample_ts':         last_ts,
+                'by_strategy':            by_strategy,
+                'feature_importance':     feature_importance,
+            }
 
     def record_outcome(self, strategy_id: str, context: Dict, won: bool) -> None:
         """

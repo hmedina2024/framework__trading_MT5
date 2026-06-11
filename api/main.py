@@ -39,6 +39,15 @@ async def lifespan(app: FastAPI):
     success = await trading_service.initialize()
     if success:
         logger.info("✅ Servicio de trading inicializado correctamente")
+
+        # Inicializar el filtro de señales ML: carga muestras etiquetadas y el
+        # modelo LightGBM desde disco. Sin esto, el modelo arranca vacío en cada
+        # reinicio y sobrescribe el historial acumulado.
+        try:
+            from core.signal_filter import signal_filter
+            signal_filter.initialize()
+        except Exception as e:
+            logger.warning(f"No se pudo inicializar SignalFilter: {e}")
         # Auto-arranque: relanzar bots que estaban activos antes del reinicio
         loop = asyncio.get_event_loop()
         launched = await loop.run_in_executor(None, trading_service._load_bots_config)

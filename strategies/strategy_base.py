@@ -1234,96 +1234,131 @@ class StrategyBase(ABC):
                     self.risk_manager.notify_position_closed(symbol)
                 except Exception:
                     pass
-                # Alerta Telegram para cierres por SL/TP
-                if _TELEGRAM_AVAILABLE:
-                    try:
-                        # Lanzar en thread separado para no bloquear el loop principal
-                        # y dar tiempo a MT5 de registrar el deal en el historial
-                        _strategy_name  = self.name
-                        _symbol         = symbol
-                        _direction      = info.get('type', '?')
-                        _ticket         = ticket
-                        _last_profit    = info.get('last_profit')  # fallback flotante
+                # Procesar el cierre en un thread aparte: resuelve el P&L real
+                # esperando a que MT5 registre el deal, actualiza estadísticas,
+                # registra el resultado en el filtro ML y envía la alerta Telegram.
+                # Va en thread (no en el loop) porque la búsqueda del deal puede
+                # tardar hasta 60s. Se ejecuta SIEMPRE, no solo con Telegram, para
+                # que las stats y el aprendizaje ML cuenten también los cierres SL/TP.
+                try:
+                    _strategy_name  = self.name
+                    _symbol         = symbol
+                    _direction      = info.get('type', '?')
+                    _ticket         = ticket
+                    _last_profit    = info.get('last_profit')  # fallback flotante
 
-                        def _send_sltp_alert(strat, sym, direc, tkt, fallback_profit):
-                            import MetaTrader5 as mt5
-                            import time as _time
-                            from datetime import timedelta, datetime as _dt
+                    def _handle_mt5_close(strat, sym, direc, tkt, fallback_profit):
+                        import MetaTrader5 as mt5
+                        import time as _time
+                        from datetime import timedelta, datetime as _dt
 
-                            profit = None
-                            reason = 'SL/TP'
+                        profit   = None
+                        reason   = 'SL/TP'
+                        resolved = False
 
-                            # Reintentar hasta 20 veces con 3 segundos = 60 segundos máximo
-                            for attempt in range(20):
-                                _time.sleep(3)
-                                try:
-                                    now   = _dt.now()
-                                    # Ventana de 4 horas para cubrir cualquier latencia de demo
-                                    deals = mt5.history_deals_get(
-                                        now - timedelta(hours=4), now
+                        # Reintentar hasta 20 veces con 3 segundos = 60 segundos máximo
+                        for attempt in range(20):
+                            _time.sleep(3)
+                            try:
+                                now   = _dt.now()
+                                # Ventana de 4 horas para cubrir cualquier latencia de demo
+                                deals = mt5.history_deals_get(
+                                    now - timedelta(hours=4), now
+                                )
+                                if not deals:
+                                    continue
+
+                                # Sumar TODOS los deals de salida de esta posición
+                                # (incluye el cierre parcial del TP + el cierre final)
+                                matched = [
+                                    d for d in deals
+                                    if d.position_id == tkt and d.entry == 1
+                                ]
+                                if matched:
+                                    profit = sum(
+                                        (d.profit or 0.0) + (d.commission or 0.0) + (d.swap or 0.0)
+                                        for d in matched
                                     )
-                                    if not deals:
-                                        continue
+                                    last_comment = (matched[-1].comment or '').lower()
+                                    if 'tp' in last_comment:
+                                        reason = 'TP'
+                                    elif 'sl' in last_comment or 'stop' in last_comment:
+                                        reason = 'SL'
+                                    else:
+                                        reason = 'TP' if profit >= 0 else 'SL'
+                                    resolved = True
+                                    break
 
-                                    for d in reversed(deals):
-                                        if d.position_id == tkt and d.entry == 1:
-                                            profit = (
-                                                (d.profit      or 0.0) +
-                                                (d.commission  or 0.0) +
-                                                (d.swap        or 0.0)
-                                            )
-                                            comment = (d.comment or '').lower()
-                                            if 'tp' in comment:
-                                                reason = 'TP'
-                                            elif 'sl' in comment or 'stop' in comment:
-                                                reason = 'SL'
-                                            else:
-                                                reason = 'TP' if profit >= 0 else 'SL'
-                                            break
+                            except Exception:
+                                pass  # reintentar
 
-                                    if profit is not None:
-                                        break  # deal encontrado
+                        # Fallback: usar último profit flotante registrado (máx 60s de retraso)
+                        if profit is None:
+                            if fallback_profit is not None:
+                                profit   = fallback_profit
+                                resolved = True
+                                reason   = ('TP' if profit >= 0 else 'SL') + ' (~aprox)'
+                                logger.warning(
+                                    f"Deal no encontrado para ticket={tkt} tras 60s — "
+                                    f"usando último P&L flotante: {profit:.2f}"
+                                )
+                            else:
+                                profit = 0.0
+                                logger.warning(
+                                    f"No se encontro deal para ticket={tkt} "
+                                    f"tras 60s y sin fallback flotante"
+                                )
 
-                                except Exception:
-                                    pass  # reintentar
+                        # Actualizar estadísticas y aprendizaje ML SOLO si el P&L se
+                        # resolvió — evita registrar un "win" falso con profit=0 desconocido.
+                        if resolved:
+                            try:
+                                self.update_stats(profit, ticket=tkt)
+                            except Exception as _se:
+                                logger.debug(f"update_stats (SL/TP) error: {_se}")
+                            if _SF_AVAILABLE:
+                                ctx = self._pending_signal_context.pop(sym, None)
+                                if ctx:
+                                    try:
+                                        _signal_filter.record_outcome(
+                                            self._strategy_id or self.name, ctx,
+                                            won=(profit >= 0)
+                                        )
+                                    except Exception as _sf_e:
+                                        logger.debug(f"record_outcome (SL/TP) error: {_sf_e}")
+                        else:
+                            # Sin P&L resoluble: descartar contexto/RR para no contaminar
+                            self._pending_signal_context.pop(sym, None)
+                            self._pending_rr.pop(tkt, None)
 
-                            # Fallback: usar último profit flotante registrado (máx 60s de retraso)
-                            if profit is None:
-                                if fallback_profit is not None:
-                                    profit = fallback_profit
-                                    reason = ('TP' if profit >= 0 else 'SL') + ' (~aprox)'
-                                    logger.warning(
-                                        f"Deal no encontrado para ticket={tkt} tras 60s — "
-                                        f"usando último P&L flotante: {profit:.2f}"
-                                    )
-                                else:
-                                    profit = 0.0
-                                    logger.warning(
-                                        f"No se encontro deal para ticket={tkt} "
-                                        f"tras 60s y sin fallback flotante"
-                                    )
+                        logger.info(
+                            f"Cierre SL/TP {sym} ticket={tkt}: "
+                            f"profit={profit:.2f}, reason={reason}, registrado={resolved}"
+                        )
 
-                            logger.info(
-                                f"Alerta SL/TP {sym} ticket={tkt}: "
-                                f"profit={profit:.2f}, reason={reason}"
-                            )
-                            alert_trade_closed(
-                                strategy  = strat,
-                                symbol    = sym,
-                                direction = direc,
-                                profit    = profit,
-                                reason    = reason
-                            )
+                        # Alerta Telegram (opcional — no bloquea el registro de stats)
+                        if _TELEGRAM_AVAILABLE:
+                            try:
+                                alert_trade_closed(
+                                    strategy  = strat,
+                                    symbol    = sym,
+                                    direction = direc,
+                                    profit    = profit,
+                                    reason    = reason
+                                )
+                            except Exception as _te:
+                                logger.debug(f"Telegram SL/TP alert error: {_te}")
 
-                        import threading as _th
-                        _th.Thread(
-                            target=_send_sltp_alert,
-                            args=(_strategy_name, _symbol, _direction, _ticket, _last_profit),
-                            daemon=True
-                        ).start()
+                    import threading as _th
+                    _th.Thread(
+                        target=_handle_mt5_close,
+                        args=(_strategy_name, _symbol, _direction, _ticket, _last_profit),
+                        daemon=True
+                    ).start()
 
-                    except Exception as e:
-                        logger.debug(f"Telegram SL/TP alert error: {e}")
+                except Exception as e:
+                    logger.debug(f"Handler cierre SL/TP error: {e}")
+
                 # Remover de posiciones conocidas
                 self._known_positions.pop(ticket, None)
                 self._partial_tp_done.pop(ticket, None)
