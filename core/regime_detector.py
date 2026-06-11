@@ -82,7 +82,7 @@ STRATEGIES_BY_REGIME = {
 }
 
 # Máximo de bots activos simultáneos por símbolo
-MAX_BOTS_PER_SYMBOL = 2
+MAX_BOTS_PER_SYMBOL = 3
 
 # ---------------------------------------------------------------------------
 # Filtro de rendimiento por bot
