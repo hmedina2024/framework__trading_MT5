@@ -212,7 +212,7 @@ class FairValueGapStrategy(StrategyBase):
                 if direction == 'SELL' and current_close > prev_close:
                     continue
 
-                logger.info(
+                logger.debug(
                     f"FVG {direction} en {symbol} | "
                     f"Gap [{fvg['bottom']:.5f} - {fvg['top']:.5f}] "
                     f"size={fvg['size']:.5f} age={fvg['age']}v | "
