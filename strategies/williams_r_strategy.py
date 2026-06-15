@@ -104,7 +104,7 @@ class WilliamsRStrategy(StrategyBase):
                     wr_curr > OVERSOLD_LEVEL and
                     current['close'] > current['ema_trend']):
 
-                logger.info(
+                logger.debug(
                     f"Williams %R BUY signal en {symbol} - "
                     f"W%R: {wr_curr:.2f} (salio de sobreventa)"
                 )
@@ -121,7 +121,7 @@ class WilliamsRStrategy(StrategyBase):
                   wr_curr < OVERBOUGHT_LEVEL and
                   current['close'] < current['ema_trend']):
 
-                logger.info(
+                logger.debug(
                     f"Williams %R SELL signal en {symbol} - "
                     f"W%R: {wr_curr:.2f} (salio de sobrecompra)"
                 )
