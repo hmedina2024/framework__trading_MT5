@@ -923,14 +923,17 @@ class StrategyBase(ABC):
                         f"{tp_old:.5f} → {prices['take_profit']:.5f}"
                     )
 
-            # 6. Validar ratio R:R minimo 1:1
+            # 6. Validar ratio R:R minimo
+            # Subido de 1.0 a 1.5: con un win rate ~37% se necesita que cada ganador
+            # valga bastante más que cada perdedor para no sangrar. Rechaza los trades
+            # con relación riesgo/beneficio pobre (la principal fuga observada).
             rr_ratio = self.risk_manager.get_risk_reward_ratio(
                 prices['entry'],
                 prices['stop_loss'],
                 prices['take_profit'],
                 is_buy=(signal['direction'] == 'BUY')
             )
-            MIN_RR_RATIO = 1.0
+            MIN_RR_RATIO = 1.5
             if rr_ratio < MIN_RR_RATIO:
                 logger.warning(
                     f"Senal rechazada para {symbol}: R:R insuficiente "

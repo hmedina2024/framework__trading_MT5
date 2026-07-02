@@ -111,7 +111,7 @@ class BreakoutStrategy(StrategyBase):
 
             # Señal de COMPRA: breakout confirmado + tendencia alcista
             if prev_broke_high and current_confirms_buy and price_above_ema:
-                logger.info(
+                logger.debug(
                     f"BREAKOUT BUY confirmado en {symbol} - "
                     f"Precio: {current['close']:.5f} > Canal: {current['donchian_high']:.5f} "
                     f"| EMA200: {current['ema200']:.5f}"
@@ -127,7 +127,7 @@ class BreakoutStrategy(StrategyBase):
 
             # Señal de VENTA: breakout confirmado + tendencia bajista
             elif prev_broke_low and current_confirms_sell and price_below_ema:
-                logger.info(
+                logger.debug(
                     f"BREAKOUT SELL confirmado en {symbol} - "
                     f"Precio: {current['close']:.5f} < Canal: {current['donchian_low']:.5f} "
                     f"| EMA200: {current['ema200']:.5f}"

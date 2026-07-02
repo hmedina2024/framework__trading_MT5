@@ -14,6 +14,12 @@ from config.settings import settings
 
 BALANCE_STATE_FILE = Path("balance_state.json")
 
+# Tope de margen por operación: ninguna posición individual puede comprometer
+# más de este % del equity en margen. Evita que un SL muy ajustado dispare un
+# lotaje desproporcionado (ej: 0.91 lotes en una cuenta de $1000 por un SL de
+# 2 pips). Es un cap de seguridad independiente del riesgo % por trade.
+MAX_MARGIN_PER_TRADE_PCT = 0.25
+
 # ---------------------------------------------------------------------------
 # Modo demo: False en producción para que el límite de pérdida diaria aplique.
 # Cambia a True únicamente para pruebas sin restricciones de drawdown diario.
@@ -247,6 +253,24 @@ class RiskManager:
             volume = symbol_info.volume_min
             logger.warning(f"Volumen ajustado al mínimo permitido: {volume} lotes")
         market_data = self.connector.get_market_data(symbol)
+
+        # Cap de seguridad por margen: limitar el lotaje para que una sola posición
+        # no comprometa más del MAX_MARGIN_PER_TRADE_PCT del equity. Protege contra
+        # el lotaje explosivo cuando el SL es muy ajustado.
+        if market_data and account_info.leverage > 0:
+            price = market_data.ask
+            margin_per_lot = (symbol_info.trade_contract_size * price) / account_info.leverage
+            if margin_per_lot > 0:
+                max_volume = (account_info.equity * MAX_MARGIN_PER_TRADE_PCT) / margin_per_lot
+                capped = max(symbol_info.volume_min, symbol_info.normalize_volume(max_volume))
+                if capped < volume:
+                    logger.warning(
+                        f"{symbol}: volumen limitado por cap de margen "
+                        f"{volume:.2f} → {capped:.2f} lotes "
+                        f"(máx {MAX_MARGIN_PER_TRADE_PCT*100:.0f}% del equity por trade)"
+                    )
+                    volume = capped
+
         if market_data and account_info.leverage > 0:
             price = market_data.ask
             required_margin = (volume * symbol_info.trade_contract_size * price) / account_info.leverage

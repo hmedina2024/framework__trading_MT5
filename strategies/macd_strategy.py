@@ -165,7 +165,7 @@ class MACDStrategy(StrategyBase):
                     current['macd'] > current['signal'] and
                     current['close'] > current['ema_trend']):
 
-                logger.info(
+                logger.debug(
                     f"MACD BUY signal en {symbol} - "
                     f"Histogram: {current['histogram']:.6f}, MACD: {current['macd']:.6f}"
                 )
@@ -185,7 +185,7 @@ class MACDStrategy(StrategyBase):
                   current['macd'] < current['signal'] and
                   current['close'] < current['ema_trend']):
 
-                logger.info(
+                logger.debug(
                     f"MACD SELL signal en {symbol} - "
                     f"Histogram: {current['histogram']:.6f}, MACD: {current['macd']:.6f}"
                 )

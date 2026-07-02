@@ -62,8 +62,9 @@ STRATEGIES_BY_REGIME = {
 
     # ADX 22-30 — tendencia moderada, la más común en Forex
     # EMA Cross y MACD son los más rentables en este rango (WR 60-75%)
-    # London ORB y NY ORB se activan aquí: impulso del open con tendencia moderada
-    'TRENDING_MILD':    ['EMA_CROSS', 'MACD', 'LONDON_ORB', 'NY_ORB'],
+    # LONDON_ORB removido: 0W/5L confirmado en datos reales (whipsaws en el rango).
+    # NY ORB se mantiene: pocos datos aún, se evalúa con el filtro de rendimiento.
+    'TRENDING_MILD':    ['EMA_CROSS', 'MACD', 'NY_ORB'],
 
     # ADX 30-45 — tendencia fuerte y sostenida
     # Supertrend + FVG: tendencia clara genera FVGs limpios y de alta continuación
@@ -125,7 +126,7 @@ SYMBOL_CONFIG = {
 # ---------------------------------------------------------------------------
 SYMBOL_PREFERRED_STRATEGY = {
     'EURUSD': 'EMA_CROSS',    # 60% WR histórico
-    'GBPUSD': 'LONDON_ORB',   # ORB es ideal para GBP en London Open
+    'GBPUSD': 'EMA_CROSS',    # LONDON_ORB removido (0% WR); EMA como base
     'USDJPY': 'EMA_CROSS',    # rendimiento estable
     'XAUUSD': 'MACD',         # 83% WR histórico — mantener el mejor bot activo
     'AUDUSD': 'EMA_CROSS',    # 100% WR (confirmar con más trades)
