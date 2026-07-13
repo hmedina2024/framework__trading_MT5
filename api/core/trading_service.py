@@ -385,6 +385,12 @@ class TradingService:
                 logger.error(f"Tipo de estrategia desconocida: {strategy_type}")
                 return False
 
+            # Asignar el ID único ANTES de start(): start() llama _load_stats(),
+            # que usa _strategy_id para leer/escribir stats_{TIPO}_{SIMBOLO}.json.
+            # Sin esto las stats se guardaban por NOMBRE (stats_EMA_CROSSOVER.json),
+            # mezclando todos los símbolos y dejando CIEGO al filtro de rendimiento
+            # del RegimeDetector (que lee stats_{TIPO}_{SIMBOLO}.json).
+            strategy._strategy_id = strategy_id
             strategy.start()
             self.active_strategies[strategy_id] = strategy
             logger.info(f"Estrategia {strategy_id} iniciada")

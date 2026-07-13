@@ -1596,6 +1596,8 @@ class StrategyBase(ABC):
             .replace(" ", "_")
             .replace("+", "")
             .replace("-", "_")
+            .replace("/", "_")     # evita que "/" se interprete como separador de path
+            .replace("\\", "_")
         )
         return Path(f"stats_{bot_id}.json")
 
