@@ -877,7 +877,11 @@ async function loadAllPositions() {
 // ============ SETTINGS ============
 
 function loadSettings() {
-    const apiUrl = localStorage.getItem('apiUrl') || 'http://localhost:8000/api/v1';
+    // Default dinámico: mismo puerto de la página actual, no uno fijo
+    // (evita quedar apuntando a un puerto/proceso viejo si el backend cambia).
+    const port = window.location.port ? `:${window.location.port}` : '';
+    const dynamicDefault = `${window.location.protocol}//${window.location.hostname}${port}/api/v1`;
+    const apiUrl = localStorage.getItem('apiUrl') || dynamicDefault;
     document.getElementById('settingApiUrl').value = apiUrl;
     checkServerHealth();
 }

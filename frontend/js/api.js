@@ -13,7 +13,11 @@
 // de forma silenciosa y el dashboard quedaba en blanco/$0.00 sin ningún error visible.
 function getApiBase() {
     const stored = localStorage.getItem('apiUrl');
-    const base = stored || `${window.location.protocol}//${window.location.hostname}:8000`;
+    // Usa el puerto de la página actual (window.location.port), no uno fijo:
+    // el frontend lo sirve el mismo FastAPI, así que siempre coincide con el
+    // backend real sin importar en qué puerto esté corriendo (8000, 8001, etc).
+    const port = window.location.port ? `:${window.location.port}` : '';
+    const base = stored || `${window.location.protocol}//${window.location.hostname}${port}`;
     const trimmed = base.replace(/\/+$/, '');
     return trimmed.endsWith('/api/v1') ? trimmed : `${trimmed}/api/v1`;
 }

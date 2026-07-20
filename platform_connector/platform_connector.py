@@ -3,6 +3,7 @@ Conector mejorado para MetaTrader5 con manejo robusto de errores
 """
 import MetaTrader5 as mt5
 import threading
+import time
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 import pandas as pd
@@ -70,14 +71,30 @@ class PlatformConnector:
                 logger.debug(f"Server: {settings.MT5_SERVER}")
                 logger.debug(f"Login: {settings.MT5_LOGIN}")
 
-                # Estrategia 1: Usar terminal ya abierto con credenciales
-                logger.info("Estrategia 1: Conectando al terminal ya abierto con credenciales...")
-                initialized = mt5.initialize(
-                    login=settings.MT5_LOGIN,
-                    password=settings.MT5_PASSWORD,
-                    server=settings.MT5_SERVER,
-                    timeout=settings.MT5_TIMEOUT
-                )
+                # Estrategia 0: engancharse a una terminal YA abierta y logueada,
+                # sin credenciales explícitas. Evita el error "Terminal: Authorization
+                # failed" que ocurre cuando se fuerza un re-login explícito sobre una
+                # sesión que ya está autenticada (ej. reconexión tras un hipo
+                # transitorio con muchos bots golpeando la API concurrentemente).
+                logger.info("Estrategia 0: Enganchando a terminal ya abierto (sin credenciales)...")
+                initialized = mt5.initialize()
+                if initialized:
+                    acc = mt5.account_info()
+                    if acc is None or acc.login != settings.MT5_LOGIN:
+                        # Terminal abierto pero en otra cuenta (o sin sesión válida)
+                        initialized = False
+                        mt5.shutdown()
+
+                if not initialized:
+                    # Estrategia 1: login explícito (primera vez, o terminal cerrado/
+                    # en otra cuenta)
+                    logger.info("Estrategia 1: Conectando con credenciales explícitas...")
+                    initialized = mt5.initialize(
+                        login=settings.MT5_LOGIN,
+                        password=settings.MT5_PASSWORD,
+                        server=settings.MT5_SERVER,
+                        timeout=settings.MT5_TIMEOUT
+                    )
 
                 if not initialized:
                     logger.warning(f"Estrategia 1 falló: {mt5.last_error()}, intentando con path...")
@@ -135,21 +152,34 @@ class PlatformConnector:
         """Verifica si hay conexión activa con MT5.
         Comprueba el flag interno Y el estado real del terminal para detectar
         desconexiones externas (crash de MT5, timeout de red, etc.).
+
+        Reintenta un par de veces antes de declarar desconexión: con muchos
+        bots (hilos) golpeando la API de MT5 concurrentemente, un solo
+        mt5.account_info() puede devolver None de forma transitoria sin que
+        la conexión real esté rota. Marcar _connected=False en ese momento es
+        costoso: el siguiente ensure_connection() dispara connect(), que
+        reintenta un login EXPLÍCITO sobre una terminal que ya está
+        autenticada — y eso sí falla de verdad ("Terminal: Authorization
+        failed"), dejando la app marcada como desconectada aunque el
+        terminal (y los bots, que llaman a MT5 por otras rutas) sigan
+        funcionando perfectamente.
         """
         if not self._connected:
             return False
-        # Verificación real: si MT5 se desconectó externamente el flag queda True
-        # pero account_info() devuelve None, lo que permite detectarlo y reconectar.
         with self._mt5_lock:
-            try:
-                if mt5.account_info() is None:
-                    logger.warning("MT5 desconectado externamente — marcando para reconexión")
-                    self._connected = False
-                    return False
-            except Exception:
-                self._connected = False
-                return False
-        return True
+            for attempt in range(3):
+                try:
+                    info = mt5.account_info()
+                    if info is not None:
+                        return True
+                    logger.error(f"DEBUG is_connected intento {attempt}: account_info=None, last_error={mt5.last_error()}, thread={threading.current_thread().name}")
+                except Exception as e:
+                    logger.error(f"DEBUG is_connected intento {attempt}: excepcion {e!r}, thread={threading.current_thread().name}")
+                if attempt < 2:
+                    time.sleep(0.3)
+            logger.warning("MT5 desconectado externamente — marcando para reconexión")
+            self._connected = False
+            return False
 
     def ensure_connection(self) -> bool:
         """
