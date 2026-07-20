@@ -303,36 +303,60 @@ class MarketAnalyzer:
             Tupla (supertrend_line, direction)
             direction: -1 = tendencia alcista (precio sobre banda), +1 = bajista
         """
+        # Nota de rendimiento: la recurrencia de Supertrend depende solo de la
+        # fila anterior, así que se calcula con arrays de numpy (acceso por
+        # índice plano) en vez de pandas .iloc fila a fila — .iloc tiene
+        # overhead alto por acceso y volvía esta función O(n) con una constante
+        # muy pesada. Con backtests que recalculan sobre un slice creciente en
+        # cada vela (walk-forward), eso se traducía en decenas de millones de
+        # accesos .iloc y backtests de horas para un solo símbolo/año.
+        #
+        # Bug de fondo corregido (preexistente, no introducido por la
+        # optimización anterior): el ATR trae NaN en sus primeras `period-1`
+        # filas (calentamiento del rolling mean). La recurrencia sembraba
+        # upper_band/lower_band desde el índice 0 incondicionalmente, y como
+        # cualquier comparación contra NaN es False, ese NaN nunca se podía
+        # "resetear" y se propagaba para siempre — el resultado era 100% NaN
+        # y direction quedaba fijo en 1 todo el tiempo. Efecto real: la
+        # estrategia Supertrend jamás pudo generar una señal válida. El fix
+        # arranca la recurrencia en el primer índice con ATR ya calentado.
         atr = self.calculate_atr(df, period)
-        hl2 = (df['high'] + df['low']) / 2
+        hl2 = ((df['high'] + df['low']) / 2).to_numpy()
+        atr_vals = atr.to_numpy()
+        close    = df['close'].to_numpy()
+        n = len(df)
 
-        upper_band = hl2 + (multiplier * atr)
-        lower_band = hl2 - (multiplier * atr)
+        supertrend = np.full(n, np.nan)
+        direction  = np.zeros(n, dtype=int)
 
-        supertrend = pd.Series(index=df.index, dtype=float)
-        direction  = pd.Series(index=df.index, dtype=int)
+        first_valid = np.argmax(~np.isnan(atr_vals)) if np.any(~np.isnan(atr_vals)) else n
+        if first_valid >= n - 1:
+            return pd.Series(supertrend, index=df.index), pd.Series(direction, index=df.index)
 
-        for i in range(1, len(df)):
-            if upper_band.iloc[i] < upper_band.iloc[i - 1] or df['close'].iloc[i - 1] > upper_band.iloc[i - 1]:
-                upper_band.iloc[i] = upper_band.iloc[i]
+        upper_raw = hl2 + (multiplier * atr_vals)
+        lower_raw = hl2 - (multiplier * atr_vals)
+
+        upper_band = np.empty(n)
+        lower_band = np.empty(n)
+        upper_band[first_valid] = upper_raw[first_valid]
+        lower_band[first_valid] = lower_raw[first_valid]
+        direction[first_valid] = 1  # sin estado previo — arranca en tendencia bajista por defecto
+
+        for i in range(first_valid + 1, n):
+            upper_band[i] = upper_raw[i] if (upper_raw[i] < upper_band[i - 1] or close[i - 1] > upper_band[i - 1]) else upper_band[i - 1]
+            lower_band[i] = lower_raw[i] if (lower_raw[i] > lower_band[i - 1] or close[i - 1] < lower_band[i - 1]) else lower_band[i - 1]
+
+            prev_st = supertrend[i - 1]
+            if np.isnan(prev_st):
+                direction[i] = 1
+            elif prev_st == upper_band[i - 1]:
+                direction[i] = -1 if close[i] > upper_band[i] else 1
             else:
-                upper_band.iloc[i] = upper_band.iloc[i - 1]
+                direction[i] = 1 if close[i] < lower_band[i] else -1
 
-            if lower_band.iloc[i] > lower_band.iloc[i - 1] or df['close'].iloc[i - 1] < lower_band.iloc[i - 1]:
-                lower_band.iloc[i] = lower_band.iloc[i]
-            else:
-                lower_band.iloc[i] = lower_band.iloc[i - 1]
+            supertrend[i] = lower_band[i] if direction[i] == -1 else upper_band[i]
 
-            if pd.isna(supertrend.iloc[i - 1]):
-                direction.iloc[i] = 1
-            elif supertrend.iloc[i - 1] == upper_band.iloc[i - 1]:
-                direction.iloc[i] = -1 if df['close'].iloc[i] > upper_band.iloc[i] else 1
-            else:
-                direction.iloc[i] = 1 if df['close'].iloc[i] < lower_band.iloc[i] else -1
-
-            supertrend.iloc[i] = lower_band.iloc[i] if direction.iloc[i] == -1 else upper_band.iloc[i]
-
-        return supertrend, direction
+        return pd.Series(supertrend, index=df.index), pd.Series(direction, index=df.index)
 
     def calculate_williams_r(
         self,
