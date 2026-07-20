@@ -42,6 +42,34 @@ async def stop_strategy(strategy_id: str, service: TradingService = Depends(get_
         raise HTTPException(status_code=404, detail="Estrategia no encontrada")
     return {"status": "stopped", "id": strategy_id}
 
+@router.post("/backtest")
+async def run_backtest(
+    symbol: str,
+    strategy_type: str,
+    days: int = 90,
+    initial_balance: float = 1000.0,
+    risk_pct: float = 0.01,
+    service: TradingService = Depends(get_trading_service)
+):
+    """
+    Ejecuta un backtest walk-forward simulado sobre datos históricos de MT5.
+    No abre posiciones reales. El endpoint que el frontend (página Backtest)
+    llama desde hace tiempo pero nunca estuvo conectado — trading_service ya
+    tenía el motor implementado (run_backtest), solo faltaba esta ruta.
+    """
+    if not service.is_connected():
+        raise HTTPException(status_code=503, detail="MT5 no conectado")
+
+    import asyncio
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None, service.run_backtest, symbol, strategy_type, days, initial_balance, risk_pct
+    )
+    if 'error' in result:
+        raise HTTPException(status_code=400, detail=result['error'])
+    return result
+
+
 @router.get("/regime")
 async def get_regime_status(service: TradingService = Depends(get_trading_service)):
     """
