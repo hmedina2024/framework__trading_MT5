@@ -877,14 +877,19 @@ async function loadAllPositions() {
 // ============ SETTINGS ============
 
 function loadSettings() {
-    const apiUrl = localStorage.getItem('apiUrl') || 'http://localhost:8000';
+    const apiUrl = localStorage.getItem('apiUrl') || 'http://localhost:8000/api/v1';
     document.getElementById('settingApiUrl').value = apiUrl;
     checkServerHealth();
 }
 
 function saveSettings() {
-    const apiUrl = document.getElementById('settingApiUrl').value;
+    // Normaliza para que siempre termine en /api/v1 sin importar lo que escriba
+    // el usuario (con o sin el sufijo) — evita que el dashboard quede en blanco
+    // por peticiones 404 silenciosas.
+    let apiUrl = document.getElementById('settingApiUrl').value.trim().replace(/\/+$/, '');
+    if (!apiUrl.endsWith('/api/v1')) apiUrl += '/api/v1';
     localStorage.setItem('apiUrl', apiUrl);
+    document.getElementById('settingApiUrl').value = apiUrl;
     showToast('Configuración guardada. Recarga la página para aplicar.', 'success');
 }
 

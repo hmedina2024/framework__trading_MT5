@@ -5,9 +5,17 @@
 
 // Bug fix: leer la URL en el momento de cada petición, no al cargar la página.
 // Así funciona correctamente tanto en localhost como en EC2 sin F5 adicional.
+//
+// Normaliza el valor guardado para que SIEMPRE termine en /api/v1, sin importar
+// si el usuario lo guardó como "http://host:8000" o "http://host:8000/api/v1".
+// Antes, si el campo de Configuración se guardaba sin el sufijo /api/v1 (el valor
+// por defecto del input así lo sugiere), TODAS las peticiones fallaban con 404
+// de forma silenciosa y el dashboard quedaba en blanco/$0.00 sin ningún error visible.
 function getApiBase() {
-    return localStorage.getItem('apiUrl') ||
-        `${window.location.protocol}//${window.location.hostname}:8000/api/v1`;
+    const stored = localStorage.getItem('apiUrl');
+    const base = stored || `${window.location.protocol}//${window.location.hostname}:8000`;
+    const trimmed = base.replace(/\/+$/, '');
+    return trimmed.endsWith('/api/v1') ? trimmed : `${trimmed}/api/v1`;
 }
 
 // ============ HTTP CLIENT ============
