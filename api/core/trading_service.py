@@ -513,7 +513,19 @@ class TradingService:
             warmup = 210
             total  = len(df_full)
 
+            # Índice de vela hasta el que la "posición simulada" sigue abierta.
+            # En vivo, execute_signal() descarta cualquier señal nueva mientras el
+            # bot ya tiene una posición abierta (_has_open_position). Sin esto, el
+            # backtest abría operaciones simuladas superpuestas sin límite en
+            # estrategias de señal frecuente (ej. FVG generaba 400-1000+ "trades"
+            # por año en un símbolo, la mayoría solapados entre sí) — inflaba
+            # artificialmente tanto los resultados buenos como los catastróficos.
+            blocked_until_idx = -1
+
             for i in range(warmup, total - 1):
+                if i < blocked_until_idx:
+                    continue  # posición simulada aún abierta — no evaluar nueva señal
+
                 df_slice = df_full.iloc[:i+1].copy()
                 signal = strategy.analyze(symbol, df_slice)
 
@@ -582,28 +594,37 @@ class TradingService:
                 # Simular resultado mirando las siguientes velas (máx 50)
                 result_pnl = None
                 close_reason = 'timeout'
+                exit_idx = min(i+51, total-1)  # default: timeout, se sobreescribe si SL/TP golpea antes
                 for j in range(i+2, min(i+52, total)):
                     bar = df_full.iloc[j]
                     if direction == 'BUY':
                         if bar['low'] <= sl:
                             result_pnl  = -(risk_points / symbol_info.point) * symbol_info.tick_value * volume
                             close_reason = 'SL'
+                            exit_idx = j
                             break
                         if bar['high'] >= tp:
                             reward      = abs(tp - entry)
                             result_pnl  = (reward / symbol_info.point) * symbol_info.tick_value * volume
                             close_reason = 'TP'
+                            exit_idx = j
                             break
                     else:
                         if bar['high'] >= sl:
                             result_pnl  = -(risk_points / symbol_info.point) * symbol_info.tick_value * volume
                             close_reason = 'SL'
+                            exit_idx = j
                             break
                         if bar['low'] <= tp:
                             reward      = abs(entry - tp)
                             result_pnl  = (reward / symbol_info.point) * symbol_info.tick_value * volume
                             close_reason = 'TP'
+                            exit_idx = j
                             break
+
+                # La posición simulada queda "abierta" hasta exit_idx — ninguna
+                # señal nueva se evalúa antes de esa vela (ver blocked_until_idx).
+                blocked_until_idx = exit_idx
 
                 if result_pnl is None:
                     # Cerrar al precio de la última vela revisada
