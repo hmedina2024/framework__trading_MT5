@@ -452,7 +452,8 @@ class TradingService:
                 'BOLLINGER':  mt5.TIMEFRAME_H4, 'MACD':       mt5.TIMEFRAME_H1,
                 'BREAKOUT':   mt5.TIMEFRAME_H4, 'SUPERTREND': mt5.TIMEFRAME_H1,
                 'EMA_CROSS':  mt5.TIMEFRAME_H1, 'WILLIAMS_R': mt5.TIMEFRAME_H1,
-                'LONDON_ORB': mt5.TIMEFRAME_H1,
+                'LONDON_ORB': mt5.TIMEFRAME_H1, 'FVG':        mt5.TIMEFRAME_H1,
+                'NY_ORB':     mt5.TIMEFRAME_H1,
             }
             timeframe = TF_MAP.get(strategy_type, mt5.TIMEFRAME_H1)
             candles_needed = days * 24 if timeframe == mt5.TIMEFRAME_H1 else days * 6
@@ -481,6 +482,8 @@ class TradingService:
                 'EMA_CROSS':  ('EMACrossoverStrategy', mt5.TIMEFRAME_H1),
                 'WILLIAMS_R': ('WilliamsRStrategy', mt5.TIMEFRAME_H1),
                 'LONDON_ORB': ('LondonORBStrategy', mt5.TIMEFRAME_H1),
+                'FVG':        ('FairValueGapStrategy', mt5.TIMEFRAME_H1),
+                'NY_ORB':     ('NYOpenORBStrategy', mt5.TIMEFRAME_H1),
             }
             class_name, tf = strategy_map.get(strategy_type, ('MACDStrategy', mt5.TIMEFRAME_H1))
             strategy_classes = {
@@ -493,6 +496,8 @@ class TradingService:
                 'EMACrossoverStrategy': EMACrossoverStrategy,
                 'WilliamsRStrategy': WilliamsRStrategy,
                 'LondonORBStrategy': LondonORBStrategy,
+                'FairValueGapStrategy': FairValueGapStrategy,
+                'NYOpenORBStrategy': NYOpenORBStrategy,
             }
             StratClass = strategy_classes.get(class_name, MACDStrategy)
             strategy = StratClass(**common_args, timeframe=tf)
@@ -548,8 +553,10 @@ class TradingService:
                     sl_mult, tp_mult = 1.5, 2.5
                 elif strategy_type == 'BREAKOUT':
                     sl_mult, tp_mult = 2.0, 4.0
-                elif strategy_type == 'LONDON_ORB':
+                elif strategy_type in ('LONDON_ORB', 'NY_ORB'):
                     sl_mult, tp_mult = 1.0, 1.5  # SL = rango, TP = 1.5x rango
+                elif strategy_type == 'FVG':
+                    sl_mult, tp_mult = 1.5, 2.5  # coincide con SL_ATR_MULT/TP_ATR_MULT reales
 
                 if direction == 'BUY':
                     sl = entry - atr * sl_mult

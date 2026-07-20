@@ -5,6 +5,21 @@ from api.core.trading_service import TradingService
 
 router = APIRouter()
 
+# Estado del comparador de estrategias — vive en memoria del proceso, un solo
+# barrido a la vez. Se persiste a disco al terminar para consultarlo tras un
+# reinicio (el backtest en sí no sobrevive un reload/restart de todas formas).
+_COMPARISON_STATE = {
+    "running":       False,
+    "started_at":    None,
+    "finished_at":   None,
+    "days":          None,
+    "total_combos":  0,
+    "completed":     0,
+    "results":       [],
+    "errors":        [],
+}
+_COMPARISON_RESULTS_FILE = "strategy_comparison_results.json"
+
 # Timeframe por símbolo (coincide con SYMBOL_CONFIG de regime_detector)
 _BACKFILL_TF = {
     'US30':   mt5.TIMEFRAME_H4,
@@ -267,3 +282,149 @@ async def stats_backfill(days: int = 120, service: TradingService = Depends(get_
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error en stats backfill: {e}")
+
+
+def _default_comparison_combos() -> list:
+    """
+    Combinaciones estrategia×símbolo relevantes: las que bots_config.json
+    tiene activas ahora mismo (lo que el RegimeDetector considera viable en
+    la práctica), en vez del producto cruzado completo de todas las
+    estrategias × todos los símbolos (72 combos, ~2h — no lo que se quiere
+    para una comparación rápida y orientada a lo que el sistema realmente usa).
+    """
+    import json as _json
+    from pathlib import Path as _Path
+    cfg = _Path("bots_config.json")
+    if not cfg.exists():
+        return []
+    try:
+        data = _json.loads(cfg.read_text(encoding="utf-8"))
+        seen = set()
+        combos = []
+        for entry in data:
+            st, sym = entry.get("strategy_type"), entry.get("symbol")
+            if st and sym and (st, sym) not in seen:
+                seen.add((st, sym))
+                combos.append((st, sym))
+        return combos
+    except Exception:
+        return []
+
+
+def _run_comparison_sync(service, combos: list, days: int, initial_balance: float, risk_pct: float) -> None:
+    """
+    Corre run_backtest() secuencialmente para cada combo. Se ejecuta en un
+    hilo aparte (no bloquea el event loop) — cada backtest individual ya es
+    una llamada sincrona pesada (~90s/combo medido para 1 año de H1).
+    Actualiza _COMPARISON_STATE incrementalmente para que el GET pueda
+    mostrar progreso mientras corre, y persiste el resultado final a disco.
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    state = _COMPARISON_STATE
+    for strategy_type, symbol in combos:
+        try:
+            result = service.run_backtest(
+                symbol=symbol, strategy_type=strategy_type, days=days,
+                initial_balance=initial_balance, risk_pct=risk_pct
+            )
+            if "error" in result:
+                state["errors"].append({"strategy": strategy_type, "symbol": symbol, "error": result["error"]})
+            else:
+                result.pop("equity_curve", None)  # no hace falta en la comparación
+                state["results"].append(result)
+        except Exception as e:
+            state["errors"].append({"strategy": strategy_type, "symbol": symbol, "error": str(e)})
+        finally:
+            state["completed"] += 1
+
+    # Ranking: expectancia por trade (pnl promedio ponderado), luego profit factor.
+    # Descarta combos con muy pocos trades (< 5) del ranking principal — no son
+    # estadísticamente representativos, pero se conservan en la lista completa.
+    for r in state["results"]:
+        r["expectancy"] = round(r["total_pnl"] / r["trades"], 2) if r.get("trades") else 0.0
+    state["results"].sort(
+        key=lambda r: (r.get("trades", 0) >= 5, r.get("expectancy", -9999)),
+        reverse=True
+    )
+
+    state["running"]     = False
+    state["finished_at"] = datetime.now().isoformat()
+
+    try:
+        _Path(_COMPARISON_RESULTS_FILE).write_text(
+            _json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+
+@router.post("/strategy-comparison")
+async def start_strategy_comparison(
+    days: int = 365,
+    initial_balance: float = 1000.0,
+    risk_pct: float = 0.02,
+    service: TradingService = Depends(get_trading_service),
+):
+    """
+    Lanza en background un backtest comparativo de las combinaciones
+    estrategia×símbolo actualmente relevantes (las de bots_config.json).
+    Devuelve de inmediato; consultar progreso/resultado con GET del mismo path.
+    Con ~21 combos y 365 días, tarda del orden de ~30-40 minutos (medido:
+    ~90s por combo para 1 año de H1).
+    """
+    if not service.is_connected():
+        raise HTTPException(status_code=503, detail="MT5 no conectado")
+    if _COMPARISON_STATE["running"]:
+        raise HTTPException(status_code=409, detail="Ya hay una comparación en curso")
+
+    combos = _default_comparison_combos()
+    if not combos:
+        raise HTTPException(status_code=400, detail="No hay bots en bots_config.json para comparar")
+
+    _COMPARISON_STATE.update({
+        "running":      True,
+        "started_at":   datetime.now().isoformat(),
+        "finished_at":  None,
+        "days":         days,
+        "total_combos": len(combos),
+        "completed":    0,
+        "results":      [],
+        "errors":       [],
+    })
+
+    import threading
+    threading.Thread(
+        target=_run_comparison_sync,
+        args=(service, combos, days, initial_balance, risk_pct),
+        daemon=True,
+    ).start()
+
+    return {
+        "started":      True,
+        "total_combos": len(combos),
+        "combos":       [f"{st}_{sym}" for st, sym in combos],
+        "days":         days,
+        "eta_minutos":  round(len(combos) * 1.6, 1),
+    }
+
+
+@router.get("/strategy-comparison")
+async def get_strategy_comparison():
+    """
+    Progreso/resultado del último barrido comparativo. Si no hay ninguno en
+    memoria (ej. tras un reinicio), intenta cargar el último resultado
+    guardado en disco.
+    """
+    if _COMPARISON_STATE["started_at"] is None:
+        import json as _json
+        from pathlib import Path as _Path
+        f = _Path(_COMPARISON_RESULTS_FILE)
+        if f.exists():
+            try:
+                return _json.loads(f.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        return {"running": False, "message": "Sin comparaciones ejecutadas todavía"}
+    return _COMPARISON_STATE
