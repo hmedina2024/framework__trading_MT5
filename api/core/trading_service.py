@@ -303,6 +303,23 @@ class TradingService:
         if not self.is_connected():
             return False
 
+        # Validación de entrada: rechaza tipos de estrategia desconocidos y
+        # símbolos que no existen en MT5. Sin esto, un valor mal escrito (ej.
+        # el placeholder literal "{symbol}" desde Swagger) creaba un bot que
+        # fallaba cada iteración con "Terminal: Call failed" y quedaba guardado
+        # en bots_config.json, ocupando un slot y ensuciando los logs.
+        if strategy_type not in self.STRATEGY_CATALOG:
+            logger.error(f"Tipo de estrategia inválido: '{strategy_type}'")
+            return False
+
+        symbol = (symbol or "").strip().upper()
+        if not symbol or self.connector.get_symbol_info(symbol) is None:
+            logger.error(
+                f"Símbolo inválido o no disponible en MT5: '{symbol}' — "
+                f"no se inicia el bot {strategy_type}_{symbol}"
+            )
+            return False
+
         strategy_id = f"{strategy_type}_{symbol}"
 
         if strategy_id in self.active_strategies:

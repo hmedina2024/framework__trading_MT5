@@ -813,6 +813,30 @@ class StrategyBase(ABC):
         for symbol in self.symbols:
             self._cooldown_until[symbol] = next_open_naive
 
+    def _timeframe_seconds(self) -> int:
+        """Duración en segundos de una vela del timeframe del bot."""
+        import MetaTrader5 as _mt5
+        tf_secs = {
+            _mt5.TIMEFRAME_M1: 60, _mt5.TIMEFRAME_M5: 300, _mt5.TIMEFRAME_M15: 900,
+            _mt5.TIMEFRAME_M30: 1800, _mt5.TIMEFRAME_H1: 3600,
+            _mt5.TIMEFRAME_H4: 14400, _mt5.TIMEFRAME_D1: 86400,
+        }
+        return tf_secs.get(self.timeframe, 3600)
+
+    def _can_evaluate_discretionary_exit(self, ticket: int) -> bool:
+        """
+        True si la posición ya vivió al menos 1 vela completa del timeframe.
+        La salida discrecional (check_exit_conditions) solo debe evaluarse en
+        límites de vela: las estrategias analizan velas cerradas, así que
+        evaluar la salida a los 5-15 min (intra-vela en H1) corta ganadores
+        por puro ruido. El SL de MT5 protege el downside mientras tanto.
+        """
+        open_time = self._position_open_times.get(ticket)
+        if open_time is None:
+            return True
+        age = (datetime.now() - open_time).total_seconds()
+        return age >= self._timeframe_seconds()
+
     def _is_position_old_enough(self, ticket: int) -> bool:
         """True si la posicion lleva al menos MIN_POSITION_AGE_SECONDS abierta."""
         open_time = self._position_open_times.get(ticket)
@@ -1398,7 +1422,12 @@ class StrategyBase(ABC):
             # Trailing stop
             self._update_trailing_stop(position)
 
-            if self.check_exit_conditions(position):
+            # Salida discrecional: solo tras al menos 1 vela completa del timeframe.
+            # Evita cortar ganadores por ruido intra-vela (se veían cierres a los
+            # 5-15 min en estrategias H1); el trailing y el TP parcial siguen
+            # protegiendo mientras tanto, y el SL de MT5 acota el downside.
+            if self._can_evaluate_discretionary_exit(position.ticket) and \
+                    self.check_exit_conditions(position):
                 logger.info(
                     f"Cerrando posicion {position.ticket} por condiciones de salida"
                 )
