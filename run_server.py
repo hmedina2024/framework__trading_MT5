@@ -34,11 +34,16 @@ if __name__ == "__main__":
     threading.Thread(target=open_browser, daemon=True).start()
 
     # Iniciar servidor Uvicorn
-    # reload=True permite reiniciar el servidor automáticamente al cambiar código
+    # reload=True permite reiniciar el servidor automáticamente al cambiar código.
+    # reload_dirs limita la vigilancia al código Python del backend: sin esto,
+    # uvicorn vigila TODO el proyecto incluida frontend/, y cualquier edición de
+    # JS/HTML reinicia el proceso completo, tumbando la conexión MT5 y los bots
+    # activos (el frontend son archivos estáticos, no necesitan reload de Python).
     uvicorn.run(
-        "api.main:app", 
-        host="0.0.0.0", 
-        port=8000, 
+        "api.main:app",
+        host="0.0.0.0",
+        port=8000,
         reload=True,
+        reload_dirs=["api", "core", "strategies", "models", "platform_connector", "utils", "config"],
         log_level="info"
     )
