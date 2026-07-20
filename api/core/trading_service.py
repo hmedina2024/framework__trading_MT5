@@ -102,7 +102,14 @@ class TradingService:
             logger.info("TradingService desconectado")
             
     def is_connected(self) -> bool:
-        return self.connector is not None and self.connector.is_connected()
+        # ensure_connection() (no is_connected() a secas) para que se auto-repare.
+        # is_connected() del connector marca _connected=False permanentemente ante
+        # cualquier fallo transitorio de mt5.account_info() (esperable con 16+ bots
+        # golpeando la API de MT5 concurrentemente) y nunca vuelve a intentarlo.
+        # Los hilos de las estrategias no sufren esto porque llaman ensure_connection()
+        # en cada iteración; los endpoints de la API llamaban is_connected() directo
+        # y quedaban bloqueados para siempre aunque el trading siguiera funcionando.
+        return self.connector is not None and self.connector.ensure_connection()
         
     def get_account_info(self):
         if not self.is_connected():
