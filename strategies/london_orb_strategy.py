@@ -251,12 +251,24 @@ class LondonORBStrategy(StrategyBase):
             adx = self.market_analyzer.calculate_adx(df, period=14)
             if adx is None or adx < params['adx_min']:
                 logger.debug(
-                    f"London ORB {symbol}: ADX={adx:.1f if adx else 'N/A'} "
+                    f"London ORB {symbol}: ADX={f'{adx:.1f}' if adx is not None else 'N/A'} "
                     f"< minimo {params['adx_min']} — sin momentum suficiente"
                 )
                 return None
 
-            # 5. Detectar breakout en la vela actual (ultima vela cerrada)
+            # 5. Filtro de volumen: la vela de breakout debe tener volumen superior
+            #    al promedio de las últimas 20 velas. Los fakeouts suelen ocurrir
+            #    en velas de bajo volumen donde no hay convicción institucional.
+            vol_current = df['tick_volume'].iloc[-1]
+            vol_avg20   = df['tick_volume'].iloc[-21:-1].mean()
+            if vol_avg20 > 0 and vol_current < vol_avg20 * 0.80:
+                logger.debug(
+                    f"London ORB {symbol}: breakout ignorado por bajo volumen "
+                    f"({vol_current:.0f} < {vol_avg20 * 0.80:.0f} — 80% avg)"
+                )
+                return None
+
+            # 6. Detectar breakout en la vela actual (ultima vela cerrada)
             current = df.iloc[-1]
             close = float(current['close'])
 
@@ -265,7 +277,7 @@ class LondonORBStrategy(StrategyBase):
                 logger.info(
                     f"London ORB BUY signal en {symbol} | "
                     f"Close={close:.5f} > ORB High={orb['high']:.5f} | "
-                    f"ADX={adx:.1f} | Rango={orb['size']:.5f}"
+                    f"ADX={adx:.1f} | Vol={vol_current:.0f} ({vol_current/vol_avg20*100:.0f}% avg)"
                 )
                 return {
                     'direction': 'BUY',
@@ -281,7 +293,7 @@ class LondonORBStrategy(StrategyBase):
                 logger.info(
                     f"London ORB SELL signal en {symbol} | "
                     f"Close={close:.5f} < ORB Low={orb['low']:.5f} | "
-                    f"ADX={adx:.1f} | Rango={orb['size']:.5f}"
+                    f"ADX={adx:.1f} | Vol={vol_current:.0f} ({vol_current/vol_avg20*100:.0f}% avg)"
                 )
                 return {
                     'direction': 'SELL',
@@ -356,8 +368,10 @@ class LondonORBStrategy(StrategyBase):
 
     def check_exit_conditions(self, position) -> bool:
         """
-        Cierra la posicion si el precio regresa al interior del rango ORB.
-        Un retorno al rango invalida el breakout — la señal fue un fakeout.
+        Cierra si el precio regresa más del 50% al interior del rango ORB.
+        El breakout sigue siendo válido si el precio oscila cerca del nivel de
+        ruptura; solo se invalida cuando regresa al punto medio del rango.
+        Esto evita cierres prematuros por pequeñas retracesiones en el breakout.
         """
         orb = self._orb_range.get(position.symbol)
         if not orb or orb.get('date') != self._today_utc():
@@ -371,19 +385,24 @@ class LondonORBStrategy(StrategyBase):
             market_data.bid if position.type == 'BUY' else market_data.ask
         )
 
-        # BUY invalidado: precio vuelve bajo el ORB high
-        if position.type == 'BUY' and current_price < orb['high']:
+        # Punto medio del rango — si el precio llega aquí el breakout fracasó
+        midpoint = (orb['high'] + orb['low']) / 2
+
+        # BUY invalidado: precio cae al interior del rango (bajo el punto medio)
+        if position.type == 'BUY' and current_price < midpoint:
             logger.info(
                 f"London ORB: cerrando BUY {position.symbol} — "
-                f"precio ({current_price:.5f}) regreso bajo ORB High ({orb['high']:.5f})"
+                f"precio ({current_price:.5f}) regreso al interior del rango "
+                f"(midpoint={midpoint:.5f}, ORB High={orb['high']:.5f})"
             )
             return True
 
-        # SELL invalidado: precio vuelve sobre el ORB low
-        if position.type == 'SELL' and current_price > orb['low']:
+        # SELL invalidado: precio sube al interior del rango (sobre el punto medio)
+        if position.type == 'SELL' and current_price > midpoint:
             logger.info(
                 f"London ORB: cerrando SELL {position.symbol} — "
-                f"precio ({current_price:.5f}) regreso sobre ORB Low ({orb['low']:.5f})"
+                f"precio ({current_price:.5f}) regreso al interior del rango "
+                f"(midpoint={midpoint:.5f}, ORB Low={orb['low']:.5f})"
             )
             return True
 

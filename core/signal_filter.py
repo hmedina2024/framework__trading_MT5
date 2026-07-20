@@ -39,6 +39,13 @@ CONFIDENCE_THRESHOLD = 0.42     # bloquear si P(ganancia) < 42%
 DATA_FILE  = Path("signal_filter_data.json")
 MODEL_FILE = Path("signal_filter_model.pkl")
 
+# Nombres de las features en el orden que produce _extract_feature_vector.
+# Se usa para reportar la importancia de cada feature en get_status().
+FEATURE_NAMES = [
+    'adx', 'atr_ratio', 'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos',
+    'spread_ratio', 'win_rate', 'direction_enc', 'bb_width_ratio',
+]
+
 # LightGBM es opcional — si no está instalado, el filtro funciona en modo heurístico
 try:
     import lightgbm as lgb
@@ -103,10 +110,80 @@ class SignalFilter:
                     logger.debug(f"SignalFilter ML error: {e} — usando heurísticas")
             return self._score_heuristic(context)
 
+    def get_status(self) -> Dict:
+        """
+        Snapshot del estado del filtro para monitoreo (endpoint /analysis/ml-status).
+        Reporta cuántas muestras etiquetadas hay, si el modelo LightGBM está activo,
+        cuántas faltan para entrenar y la importancia de cada feature si hay modelo.
+        """
+        with self._data_lock:
+            labeled = [s for s in self._samples if s.get('outcome') is not None]
+            labeled_count = len(labeled)
+            wins   = sum(1 for s in labeled if s.get('outcome') == 1)
+            losses = labeled_count - wins
+
+            # Desglose por bot (strategy_id)
+            by_strategy: Dict[str, Dict[str, int]] = {}
+            for s in labeled:
+                sid = s.get('strategy_id', 'desconocido')
+                bucket = by_strategy.setdefault(sid, {'wins': 0, 'losses': 0})
+                if s.get('outcome') == 1:
+                    bucket['wins'] += 1
+                else:
+                    bucket['losses'] += 1
+
+            last_ts = labeled[-1].get('ts') if labeled else None
+
+            # Importancia de features (solo si el modelo está entrenado)
+            feature_importance = None
+            if self._model is not None and _LGB_AVAILABLE:
+                try:
+                    importances = self._model.feature_importances_
+                    feature_importance = {
+                        name: int(imp)
+                        for name, imp in zip(FEATURE_NAMES, importances)
+                    }
+                except Exception:
+                    feature_importance = None
+
+            mode = 'LightGBM' if (self._model is not None and _LGB_AVAILABLE) else 'heurístico'
+
+            backfill_count = sum(1 for s in labeled if s.get('source') == 'mt5_backfill')
+            live_count     = labeled_count - backfill_count
+
+            return {
+                'initialized':            self._initialized,
+                'mode':                   mode,
+                'model_active':           self._model is not None,
+                'lightgbm_available':     _LGB_AVAILABLE,
+                'model_file_exists':      MODEL_FILE.exists(),
+                'labeled_samples':        labeled_count,
+                'labeled_live':           live_count,
+                'labeled_backfill':       backfill_count,
+                'live_until_purge':       max(0, MIN_SAMPLES_TO_TRAIN - live_count) if backfill_count else 0,
+                'total_samples':          len(self._samples),
+                'wins':                   wins,
+                'losses':                 losses,
+                'win_rate':               round(wins / labeled_count, 4) if labeled_count else None,
+                'min_samples_to_train':   MIN_SAMPLES_TO_TRAIN,
+                'samples_until_activation': max(0, MIN_SAMPLES_TO_TRAIN - labeled_count),
+                'samples_at_last_train':  self._samples_at_last_train,
+                'retrain_interval':       RE_TRAIN_INTERVAL,
+                'confidence_threshold':   CONFIDENCE_THRESHOLD,
+                'last_sample_ts':         last_ts,
+                'by_strategy':            by_strategy,
+                'feature_importance':     feature_importance,
+            }
+
     def record_outcome(self, strategy_id: str, context: Dict, won: bool) -> None:
         """
-        Registra el resultado de un trade cerrado como muestra etiquetada.
+        Registra el resultado de un trade cerrado como muestra etiquetada (en vivo).
         Re-entrena el modelo LightGBM si se alcanzó el intervalo configurado.
+
+        Estrategia híbrida: si hay muestras históricas de backfill y ya se
+        acumularon MIN_SAMPLES_TO_TRAIN muestras EN VIVO, las históricas se
+        purgan automáticamente y el modelo continúa solo con datos en vivo
+        (más precisos en spread_ratio y win_rate).
         """
         if not context:
             return
@@ -115,6 +192,7 @@ class SignalFilter:
                 **context,
                 'strategy_id': strategy_id,
                 'outcome':     1 if won else 0,
+                'source':      'live',
                 'ts':          datetime.now(timezone.utc).isoformat(),
             }
             self._samples.append(sample)
@@ -123,10 +201,75 @@ class SignalFilter:
             if not _LGB_AVAILABLE:
                 return
 
+            # Purga híbrida: al llegar a 50 muestras en vivo, descartar el backfill
+            live_labeled = self._labeled_live_count()
+            has_backfill = any(s.get('source') == 'mt5_backfill' for s in self._samples)
+            if has_backfill and live_labeled >= MIN_SAMPLES_TO_TRAIN:
+                before = len(self._samples)
+                self._samples = [
+                    s for s in self._samples if s.get('source') != 'mt5_backfill'
+                ]
+                self._save_samples()
+                logger.info(
+                    f"SignalFilter: {live_labeled} muestras en vivo alcanzadas — "
+                    f"purgadas {before - len(self._samples)} muestras históricas "
+                    f"(backfill). El modelo continúa solo con datos en vivo."
+                )
+                self._train_model()
+                return
+
             labeled = self._labeled_count()
             new_since = labeled - self._samples_at_last_train
             if labeled >= MIN_SAMPLES_TO_TRAIN and new_since >= RE_TRAIN_INTERVAL:
                 self._train_model()
+
+    def bulk_import_samples(self, samples: List[Dict]) -> Dict:
+        """
+        Importa muestras históricas reconstruidas desde el historial de MT5
+        (backfill). Cada muestra se marca con source='mt5_backfill' y un
+        position_id para evitar duplicados si se ejecuta más de una vez.
+        Entrena el modelo una sola vez al final. Devuelve un resumen.
+        """
+        with self._data_lock:
+            existing_pids = {
+                s.get('position_id') for s in self._samples
+                if s.get('position_id') is not None
+            }
+            imported = skipped = 0
+            for s in samples:
+                pid = s.get('position_id')
+                if pid is not None and pid in existing_pids:
+                    skipped += 1
+                    continue
+                s['source'] = 'mt5_backfill'
+                self._samples.append(s)
+                if pid is not None:
+                    existing_pids.add(pid)
+                imported += 1
+
+            self._save_samples()
+
+            trained = False
+            if _LGB_AVAILABLE and self._labeled_count() >= MIN_SAMPLES_TO_TRAIN:
+                self._train_model()
+                trained = self._model is not None
+
+            return {
+                'imported':       imported,
+                'skipped':        skipped,
+                'total_samples':  len(self._samples),
+                'labeled':        self._labeled_count(),
+                'labeled_live':   self._labeled_live_count(),
+                'trained':        trained,
+                'mode':           'LightGBM' if self._model else 'heurístico',
+            }
+
+    def _labeled_live_count(self) -> int:
+        """Muestras etiquetadas que NO provienen del backfill histórico."""
+        return sum(
+            1 for s in self._samples
+            if s.get('outcome') is not None and s.get('source') != 'mt5_backfill'
+        )
 
     # -----------------------------------------------------------------------
     # Heurísticas de bootstrap

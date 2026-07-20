@@ -115,25 +115,57 @@ class MACDStrategy(StrategyBase):
                     pd.isna(current['ema_trend'])):
                 return None
 
+            # Filtro de volumen relativo: el cruce debe ocurrir con convicción
+            vol_current = df['tick_volume'].iloc[-2]
+            vol_avg20   = df['tick_volume'].iloc[-21:-1].mean()
+            if vol_avg20 > 0 and vol_current < vol_avg20 * 0.70:
+                logger.debug(
+                    f"MACD {symbol}: cruce ignorado por bajo volumen "
+                    f"({vol_current:.0f} < {vol_avg20 * 0.70:.0f} — 70% avg)"
+                )
+                return None
+
             # Filtro de magnitud: rechaza cruces de ruido
             min_threshold = self._get_min_threshold(symbol)
             if abs(current['histogram']) < min_threshold:
                 # Loguear solo si hay cruce (para no llenar el log en lateral)
                 if (previous['histogram'] < 0 < current['histogram'] or
                         previous['histogram'] > 0 > current['histogram']):
-                    logger.info(
+                    logger.debug(
                         f"{symbol}: cruce MACD rechazado por ruido — "
                         f"histograma {current['histogram']:.6f} < umbral {min_threshold}"
                     )
                 return None
 
+            # Filtro de divergencia RSI: bloquea cruces en agotamiento de tendencia
+            rsi = self.market_analyzer.calculate_rsi(df, period=14)
+            rsi_ok_buy  = True
+            rsi_ok_sell = True
+            if rsi is not None and not rsi.isna().iloc[-3:].any():
+                price_high_now  = df['high'].iloc[-1]
+                price_high_prev = df['high'].iloc[-6:-1].max()
+                rsi_now         = rsi.iloc[-1]
+                rsi_prev        = rsi.iloc[-6:-1].max()
+                if price_high_now > price_high_prev and rsi_now < rsi_prev - 3:
+                    rsi_ok_buy = False
+                    logger.debug(f"MACD {symbol}: divergencia bajista RSI — BUY ignorado")
+
+                price_low_now  = df['low'].iloc[-1]
+                price_low_prev = df['low'].iloc[-6:-1].min()
+                rsi_low_now    = rsi.iloc[-1]
+                rsi_low_prev   = rsi.iloc[-6:-1].min()
+                if price_low_now < price_low_prev and rsi_low_now > rsi_low_prev + 3:
+                    rsi_ok_sell = False
+                    logger.debug(f"MACD {symbol}: divergencia alcista RSI — SELL ignorado")
+
             # Senal de COMPRA
-            if (previous['histogram'] < 0 and
+            if (rsi_ok_buy and
+                    previous['histogram'] < 0 and
                     current['histogram'] > 0 and
                     current['macd'] > current['signal'] and
                     current['close'] > current['ema_trend']):
 
-                logger.info(
+                logger.debug(
                     f"MACD BUY signal en {symbol} - "
                     f"Histogram: {current['histogram']:.6f}, MACD: {current['macd']:.6f}"
                 )
@@ -147,12 +179,13 @@ class MACDStrategy(StrategyBase):
                 }
 
             # Senal de VENTA
-            elif (previous['histogram'] > 0 and
+            elif (rsi_ok_sell and
+                  previous['histogram'] > 0 and
                   current['histogram'] < 0 and
                   current['macd'] < current['signal'] and
                   current['close'] < current['ema_trend']):
 
-                logger.info(
+                logger.debug(
                     f"MACD SELL signal en {symbol} - "
                     f"Histogram: {current['histogram']:.6f}, MACD: {current['macd']:.6f}"
                 )

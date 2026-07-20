@@ -56,22 +56,24 @@ STRATEGIES_BY_REGIME = {
     'RANGING_PURE':     ['BOLLINGER', 'WILLIAMS_R', 'RSI'],
 
     # ADX 18-22 — lateral con ligera direccionalidad
-    # Williams %R más fiable que Bollinger, MA Cross captura mini-tendencias
-    'RANGING_MILD':     ['WILLIAMS_R', 'MA_CROSS', 'RSI'],
+    # Williams %R y RSI detectan reversiones; MA Cross se excluye porque genera
+    # whipsaws en mercados sin tendencia (confirmado: 0% WR en datos reales)
+    'RANGING_MILD':     ['WILLIAMS_R', 'RSI'],
 
     # ADX 22-30 — tendencia moderada, la más común en Forex
     # EMA Cross y MACD son los más rentables en este rango (WR 60-75%)
-    # London ORB se activa aquí: el impulso del open requiere tendencia moderada
-    'TRENDING_MILD':    ['EMA_CROSS', 'MACD', 'LONDON_ORB'],
+    # LONDON_ORB removido: 0W/5L confirmado en datos reales (whipsaws en el rango).
+    # NY ORB se mantiene: pocos datos aún, se evalúa con el filtro de rendimiento.
+    'TRENDING_MILD':    ['EMA_CROSS', 'MACD', 'NY_ORB'],
 
     # ADX 30-45 — tendencia fuerte y sostenida
-    # Supertrend se activa aquí — requiere tendencia clara para funcionar
-    # London ORB también funciona bien con tendencia fuerte
-    'TRENDING_STRONG':  ['EMA_CROSS', 'MACD', 'SUPERTREND', 'LONDON_ORB'],
+    # Supertrend + FVG: tendencia clara genera FVGs limpios y de alta continuación
+    # NY ORB también funciona bien — el overlap Londres+NY tiene máximo volumen
+    'TRENDING_STRONG':  ['EMA_CROSS', 'MACD', 'SUPERTREND', 'FVG', 'NY_ORB'],
 
     # ADX > 45 — tendencia extrema (eventos macro, noticias de alto impacto)
-    # Breakout captura rupturas de rango, Supertrend sigue la tendencia
-    'TRENDING_EXTREME': ['BREAKOUT', 'SUPERTREND'],
+    # Breakout captura rupturas de rango, FVG captura retornos al desequilibrio
+    'TRENDING_EXTREME': ['BREAKOUT', 'FVG'],
 
     # Alta volatilidad sin dirección — spread alto, riesgo extremo
     'VOLATILE':         [],
@@ -81,7 +83,7 @@ STRATEGIES_BY_REGIME = {
 }
 
 # Máximo de bots activos simultáneos por símbolo
-MAX_BOTS_PER_SYMBOL = 2
+MAX_BOTS_PER_SYMBOL = 3
 
 # ---------------------------------------------------------------------------
 # Filtro de rendimiento por bot
@@ -124,7 +126,7 @@ SYMBOL_CONFIG = {
 # ---------------------------------------------------------------------------
 SYMBOL_PREFERRED_STRATEGY = {
     'EURUSD': 'EMA_CROSS',    # 60% WR histórico
-    'GBPUSD': 'LONDON_ORB',   # ORB es ideal para GBP en London Open
+    'GBPUSD': 'EMA_CROSS',    # LONDON_ORB removido (0% WR); EMA como base
     'USDJPY': 'EMA_CROSS',    # rendimiento estable
     'XAUUSD': 'MACD',         # 83% WR histórico — mantener el mejor bot activo
     'AUDUSD': 'EMA_CROSS',    # 100% WR (confirmar con más trades)
@@ -144,6 +146,7 @@ class RegimeDetector:
         self.trading_service = trading_service
         self._regimes: Dict[str, Dict] = {}
         self._last_update: Optional[datetime] = None
+        self._last_london_open_date: Optional[object] = None  # evita disparar 5x en 07:00-07:04
         self._running = False
         self._thread: Optional[threading.Thread] = None
         # {strategy_id: blocked_until_datetime} — bots pausados por bajo rendimiento
@@ -446,9 +449,11 @@ class RegimeDetector:
                 now_utc = datetime.now(timezone.utc)
                 should_update = False
 
-                # Apertura de Londres 07:00 UTC
+                # Apertura de Londres 07:00 UTC — solo una vez por día
                 if REGIME_UPDATE_AT_OPEN and now_utc.hour == 7 and now_utc.minute < 5:
-                    should_update = True
+                    if self._last_london_open_date != now_utc.date():
+                        should_update = True
+                        self._last_london_open_date = now_utc.date()
 
                 # Cada N horas
                 if self._last_update:

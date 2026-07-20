@@ -521,6 +521,72 @@ class PlatformConnector:
                 logger.error(f"Error al obtener historial: {str(e)}", exc_info=True)
                 return []
 
+    def get_closed_trades(self, from_date=None, to_date=None):
+        """
+        Devuelve round-trips cerrados (entrada+salida) emparejando los deals
+        IN (entry==0) y OUT (entry==1) por position_id. Pensado para el backfill
+        del modelo ML: necesita la hora y dirección de ENTRADA (no del cierre).
+
+        Cada elemento: {position_id, symbol, magic, direction, entry_time (UTC),
+        close_time (UTC), profit (neto incluyendo comisiones y swap)}.
+        El profit suma todos los deals de salida (cierre parcial + final).
+        """
+        if not self.ensure_connection():
+            return []
+
+        with self._mt5_lock:
+            try:
+                from datetime import timedelta
+                now = datetime.now()
+                date_from = from_date or (now - timedelta(days=90))
+                date_to   = to_date   or now
+
+                deals = mt5.history_deals_get(date_from, date_to)
+                if not deals:
+                    logger.warning(f"get_closed_trades: sin deals ({mt5.last_error()})")
+                    return []
+
+                entries = {}   # position_id -> deal de entrada
+                exits   = {}   # position_id -> lista de deals de salida
+                for d in deals:
+                    if not d.symbol:
+                        continue
+                    if d.entry == 0:        # DEAL_ENTRY_IN
+                        entries.setdefault(d.position_id, d)
+                    elif d.entry == 1:      # DEAL_ENTRY_OUT
+                        exits.setdefault(d.position_id, []).append(d)
+
+                trades = []
+                for pid, ein in entries.items():
+                    outs = exits.get(pid)
+                    if not outs:
+                        continue  # posición aún abierta
+                    profit = sum(
+                        (o.profit or 0.0) + (o.commission or 0.0) + (o.swap or 0.0)
+                        for o in outs
+                    )
+                    close_time = max(o.time for o in outs)
+                    trades.append({
+                        'position_id': pid,
+                        'symbol':      ein.symbol,
+                        'magic':       ein.magic,
+                        'direction':   'BUY' if ein.type == 0 else 'SELL',
+                        'entry_time':  datetime.utcfromtimestamp(ein.time),
+                        'close_time':  datetime.utcfromtimestamp(close_time),
+                        'profit':      profit,
+                    })
+
+                trades.sort(key=lambda t: t['entry_time'])
+                logger.info(
+                    f"get_closed_trades: {len(trades)} round-trips "
+                    f"({date_from.date()} — {date_to.date()})"
+                )
+                return trades
+
+            except Exception as e:
+                logger.error(f"Error en get_closed_trades: {str(e)}", exc_info=True)
+                return []
+
 
     def __enter__(self):
         """Context manager entry"""

@@ -77,6 +77,21 @@ TRAILING_ACTIVATION_ATR = 1.0   # activar cuando ganancia >= 1x ATR
 TRAILING_STOP_ATR       = 1.0   # SL se coloca a 1x ATR del precio actual
 
 # ---------------------------------------------------------------------------
+# Take-profit parcial + breakeven
+# Cuando la posicion alcanza PARTIAL_TP_ACTIVATION_R veces el riesgo inicial (1R
+# = distancia entrada→SL original), se cierra una fraccion del volumen para
+# asegurar ganancia y se mueve el SL a breakeven (precio de entrada). El resto
+# de la posicion corre sin riesgo, gestionado por el trailing stop.
+# Beneficio: convierte muchos trades en "free trades" y reduce el drawdown.
+# Si la posicion es demasiado pequeña para dividirse (volumen restante < minimo),
+# solo se mueve el SL a breakeven sin cerrar nada.
+# ---------------------------------------------------------------------------
+PARTIAL_TP_ENABLED        = True
+PARTIAL_TP_ACTIVATION_R   = 1.0    # activar al alcanzar 1x el riesgo inicial
+PARTIAL_TP_CLOSE_FRACTION = 0.5    # cerrar 50% del volumen
+BREAKEVEN_ON_PARTIAL      = True   # mover SL a breakeven tras el cierre parcial
+
+# ---------------------------------------------------------------------------
 # Filtro de sesion de trading
 # Solo opera durante las sesiones de mayor liquidez (hora del servidor UTC+2)
 # Sesion Londres:    07:00 - 16:00 UTC  = 09:00 - 18:00 UTC+2
@@ -87,6 +102,12 @@ TRAILING_STOP_ATR       = 1.0   # SL se coloca a 1x ATR del precio actual
 TRADING_SESSION_FILTER  = True   # False = operar 24h (modo sin restriccion)
 SESSION_START_UTC       = 7      # hora UTC de inicio (apertura Londres)
 SESSION_END_UTC         = 20     # hora UTC de cierre (cierre NY)
+
+# Símbolos que operan 24/7 y NO deben restringirse al horario Londres+NY.
+# Las criptos tienen liquidez y movimientos fuertes también en sesión asiática,
+# por lo que aplicarles el filtro Forex deja fuera ~11h/día sin razón.
+# Se evalúa por substring para cubrir variantes del bróker (BTCUSD, ETHUSD, BTCUSD.r, etc.)
+SESSION_24H_SYMBOLS = ('BTC', 'ETH', 'LTC', 'XRP', 'DOGE', 'SOL', 'BNB', 'ADA')
 
 # ---------------------------------------------------------------------------
 # Filtro de correlación entre pares
@@ -248,6 +269,9 @@ class StrategyBase(ABC):
         # Trailing stop: SL maximo registrado por ticket {ticket: float}
         self._trailing_sl: Dict[int, float] = {}
 
+        # TP parcial ya ejecutado por ticket {ticket: True} — evita repetir el cierre
+        self._partial_tp_done: Dict[int, bool] = {}
+
         # Tracking de posiciones conocidas para detectar cierres por SL/TP de MT5
         # {ticket: {'symbol': str, 'type': str}}
         self._known_positions: Dict[int, Dict] = {}
@@ -264,6 +288,10 @@ class StrategyBase(ABC):
         # Contexto de señal para el signal_filter (aprendizaje online)
         # {symbol: context_dict} — se guarda cuando la señal pasa el filtro
         self._pending_signal_context: Dict[str, Dict] = {}
+
+        # Timestamp de la última vela cerrada que generó señal por símbolo.
+        # Evita re-procesar la misma señal en iteraciones dentro de la misma vela.
+        self._last_signal_candle: Dict[str, object] = {}
 
         logger.info(f"Estrategia '{name}' inicializada para {symbols}")
 
@@ -332,15 +360,22 @@ class StrategyBase(ABC):
             return True
         return False
 
-    def _is_trading_session(self) -> bool:
+    def _is_trading_session(self, symbol: Optional[str] = None) -> bool:
         """
         Verifica si el mercado esta en horario de sesion activa.
         Basado en UTC para ser independiente de la zona horaria del servidor.
         Solo permite operar entre SESSION_START_UTC y SESSION_END_UTC.
         Fuera de ese rango (sesion asiatica principalmente) bloquea nuevas entradas.
         Las posiciones ya abiertas NO se cierran — solo se bloquean nuevas entradas.
+
+        Excepción: los símbolos en SESSION_24H_SYMBOLS (criptos) operan 24/7 y
+        no se restringen al horario Forex.
         """
         if not TRADING_SESSION_FILTER:
+            return True
+
+        # Criptos y otros activos 24/7 no aplican el filtro de sesión Forex
+        if symbol and any(token in symbol.upper() for token in SESSION_24H_SYMBOLS):
             return True
 
         from datetime import timezone
@@ -810,7 +845,8 @@ class StrategyBase(ABC):
                     return False
 
             # 0. Filtro de sesion — no abrir nuevas posiciones fuera de horario
-            if not self._is_trading_session():
+            # (las criptos quedan exentas: operan 24/7)
+            if not self._is_trading_session(symbol):
                 return False
 
             # 0b. Filtro de correlacion — evita doble exposicion al mismo par USD
@@ -887,14 +923,17 @@ class StrategyBase(ABC):
                         f"{tp_old:.5f} → {prices['take_profit']:.5f}"
                     )
 
-            # 6. Validar ratio R:R minimo 1:1
+            # 6. Validar ratio R:R minimo
+            # Subido de 1.0 a 1.5: con un win rate ~37% se necesita que cada ganador
+            # valga bastante más que cada perdedor para no sangrar. Rechaza los trades
+            # con relación riesgo/beneficio pobre (la principal fuga observada).
             rr_ratio = self.risk_manager.get_risk_reward_ratio(
                 prices['entry'],
                 prices['stop_loss'],
                 prices['take_profit'],
                 is_buy=(signal['direction'] == 'BUY')
             )
-            MIN_RR_RATIO = 1.0
+            MIN_RR_RATIO = 1.5
             if rr_ratio < MIN_RR_RATIO:
                 logger.warning(
                     f"Senal rechazada para {symbol}: R:R insuficiente "
@@ -1005,8 +1044,16 @@ class StrategyBase(ABC):
 
                 signal = self.analyze(symbol, df)
                 if signal:
-                    logger.info(f"Senal detectada para {symbol}: {signal}")
-                    self.execute_signal(symbol, signal, df=df)
+                    candle_time = df.index[-1]
+                    if self._last_signal_candle.get(symbol) == candle_time:
+                        logger.debug(
+                            f"{self.name} | {symbol}: señal ignorada — "
+                            f"misma vela ya procesada ({candle_time})"
+                        )
+                    else:
+                        self._last_signal_candle[symbol] = candle_time
+                        logger.info(f"Senal detectada para {symbol}: {signal}")
+                        self.execute_signal(symbol, signal, df=df)
 
                 self._check_open_positions(symbol)
 
@@ -1019,6 +1066,93 @@ class StrategyBase(ABC):
         """Verifica si hay posicion abierta para este bot en el simbolo."""
         positions = self.connector.get_positions(symbol)
         return any(p.magic_number == self.magic_number for p in positions)
+
+    def _check_partial_take_profit(self, position) -> None:
+        """
+        Cierra una fracción del volumen al alcanzar PARTIAL_TP_ACTIVATION_R veces
+        el riesgo inicial (R = distancia entrada→SL original) y mueve el SL a
+        breakeven. Convierte la operación en "free trade": el resto corre sin
+        riesgo. Se ejecuta una sola vez por ticket.
+
+        Si la posición es demasiado pequeña para dividirse (cualquiera de las dos
+        partes quedaría bajo el volumen mínimo del símbolo), solo se mueve el SL
+        a breakeven sin cerrar volumen.
+        """
+        if not PARTIAL_TP_ENABLED:
+            return
+        if self._partial_tp_done.get(position.ticket):
+            return
+
+        info      = self._known_positions.get(position.ticket, {})
+        risk_dist = info.get('risk_dist')
+        if not risk_dist or risk_dist <= 0:
+            return  # sin riesgo inicial registrado — no se puede calcular R
+
+        try:
+            market_data = self.connector.get_market_data(position.symbol)
+            symbol_info = self.connector.get_symbol_info(position.symbol)
+            if not market_data or not symbol_info:
+                return
+
+            current_price = market_data.bid if position.type == "BUY" else market_data.ask
+            if position.type == "BUY":
+                profit_dist = current_price - position.price_open
+            else:
+                profit_dist = position.price_open - current_price
+
+            # Activar solo al alcanzar N veces el riesgo inicial
+            if profit_dist < risk_dist * PARTIAL_TP_ACTIVATION_R:
+                return
+
+            close_volume = symbol_info.normalize_volume(
+                position.volume * PARTIAL_TP_CLOSE_FRACTION
+            )
+            remaining = round(position.volume - close_volume, 8)
+            can_split = (
+                close_volume >= symbol_info.volume_min and
+                remaining   >= symbol_info.volume_min
+            )
+
+            if can_split:
+                result = self.order_manager.close_position(
+                    position.ticket, volume=close_volume
+                )
+                if not result.success:
+                    logger.warning(
+                        f"TP parcial falló | {position.symbol} ticket={position.ticket}: "
+                        f"{result.error_message}"
+                    )
+                    return
+                logger.info(
+                    f"TP parcial | {position.symbol} {position.type} "
+                    f"ticket={position.ticket} | cerrado {close_volume} de "
+                    f"{position.volume} a {PARTIAL_TP_ACTIVATION_R:.1f}R | "
+                    f"restante {remaining} protegido en breakeven"
+                )
+            else:
+                logger.info(
+                    f"Posición {position.symbol} ticket={position.ticket} muy pequeña "
+                    f"para dividir (vol={position.volume}) — solo se mueve SL a breakeven"
+                )
+
+            # Mover SL a breakeven para asegurar la parte restante sin riesgo
+            if BREAKEVEN_ON_PARTIAL:
+                breakeven_sl = symbol_info.normalize_price(position.price_open)
+                mod = self.order_manager.modify_position(
+                    position.ticket, stop_loss=breakeven_sl
+                )
+                if mod.success:
+                    logger.info(
+                        f"SL a breakeven | {position.symbol} ticket={position.ticket} "
+                        f"→ {breakeven_sl:.5f}"
+                    )
+
+            self._partial_tp_done[position.ticket] = True
+
+        except Exception as e:
+            logger.error(
+                f"Error en TP parcial para ticket {position.ticket}: {e}"
+            )
 
     def _update_trailing_stop(self, position) -> None:
         """
@@ -1103,106 +1237,163 @@ class StrategyBase(ABC):
                     self.risk_manager.notify_position_closed(symbol)
                 except Exception:
                     pass
-                # Alerta Telegram para cierres por SL/TP
-                if _TELEGRAM_AVAILABLE:
-                    try:
-                        # Lanzar en thread separado para no bloquear el loop principal
-                        # y dar tiempo a MT5 de registrar el deal en el historial
-                        _strategy_name  = self.name
-                        _symbol         = symbol
-                        _direction      = info.get('type', '?')
-                        _ticket         = ticket
+                # Procesar el cierre en un thread aparte: resuelve el P&L real
+                # esperando a que MT5 registre el deal, actualiza estadísticas,
+                # registra el resultado en el filtro ML y envía la alerta Telegram.
+                # Va en thread (no en el loop) porque la búsqueda del deal puede
+                # tardar hasta 60s. Se ejecuta SIEMPRE, no solo con Telegram, para
+                # que las stats y el aprendizaje ML cuenten también los cierres SL/TP.
+                try:
+                    _strategy_name  = self.name
+                    _symbol         = symbol
+                    _direction      = info.get('type', '?')
+                    _ticket         = ticket
+                    _last_profit    = info.get('last_profit')  # fallback flotante
 
-                        def _send_sltp_alert(strat, sym, direc, tkt):
-                            import MetaTrader5 as mt5
-                            import time as _time
-                            from datetime import timedelta, datetime as _dt
+                    def _handle_mt5_close(strat, sym, direc, tkt, fallback_profit):
+                        import MetaTrader5 as mt5
+                        import time as _time
+                        from datetime import timedelta, datetime as _dt
 
-                            profit = None
-                            reason = 'SL/TP'
+                        profit   = None
+                        reason   = 'SL/TP'
+                        resolved = False
 
-                            # Reintentar hasta 10 veces con 2 segundos entre intentos
-                            # = hasta 20 segundos de espera total para que MT5 registre el deal
-                            for attempt in range(10):
-                                _time.sleep(2)  # esperar siempre, incluso en el primer intento
-                                try:
-                                    now   = _dt.now()
-                                    deals = mt5.history_deals_get(
-                                        now - timedelta(minutes=60), now
+                        # Reintentar hasta 20 veces con 3 segundos = 60 segundos máximo
+                        for attempt in range(20):
+                            _time.sleep(3)
+                            try:
+                                now   = _dt.now()
+                                # Ventana de 4 horas para cubrir cualquier latencia de demo
+                                deals = mt5.history_deals_get(
+                                    now - timedelta(hours=4), now
+                                )
+                                if not deals:
+                                    continue
+
+                                # Sumar TODOS los deals de salida de esta posición
+                                # (incluye el cierre parcial del TP + el cierre final)
+                                matched = [
+                                    d for d in deals
+                                    if d.position_id == tkt and d.entry == 1
+                                ]
+                                if matched:
+                                    profit = sum(
+                                        (d.profit or 0.0) + (d.commission or 0.0) + (d.swap or 0.0)
+                                        for d in matched
                                     )
-                                    if not deals:
-                                        continue
+                                    last_comment = (matched[-1].comment or '').lower()
+                                    if 'tp' in last_comment:
+                                        reason = 'TP'
+                                    elif 'sl' in last_comment or 'stop' in last_comment:
+                                        reason = 'SL'
+                                    else:
+                                        reason = 'TP' if profit >= 0 else 'SL'
+                                    resolved = True
+                                    break
 
-                                    for d in reversed(deals):
-                                        if d.position_id == tkt and d.entry == 1:
-                                            profit = (
-                                                (d.profit      or 0.0) +
-                                                (d.commission  or 0.0) +
-                                                (d.swap        or 0.0)
-                                            )
-                                            comment = (d.comment or '').lower()
-                                            if 'tp' in comment:
-                                                reason = 'TP'
-                                            elif 'sl' in comment or 'stop' in comment:
-                                                reason = 'SL'
-                                            else:
-                                                reason = 'TP' if profit >= 0 else 'SL'
-                                            break
+                            except Exception:
+                                pass  # reintentar
 
-                                    if profit is not None:
-                                        break  # deal encontrado
-
-                                except Exception:
-                                    pass  # reintentar
-
-                            # Si después de 20 segundos no lo encontramos,
-                            # intentar obtener el profit de la posicion cerrada
-                            # comparando balance antes/después (aproximado)
-                            if profit is None:
+                        # Fallback: usar último profit flotante registrado (máx 60s de retraso)
+                        if profit is None:
+                            if fallback_profit is not None:
+                                profit   = fallback_profit
+                                resolved = True
+                                reason   = ('TP' if profit >= 0 else 'SL') + ' (~aprox)'
+                                logger.warning(
+                                    f"Deal no encontrado para ticket={tkt} tras 60s — "
+                                    f"usando último P&L flotante: {profit:.2f}"
+                                )
+                            else:
                                 profit = 0.0
                                 logger.warning(
                                     f"No se encontro deal para ticket={tkt} "
-                                    f"después de 20s — enviando con profit desconocido"
+                                    f"tras 60s y sin fallback flotante"
                                 )
 
-                            logger.info(
-                                f"Alerta SL/TP {sym} ticket={tkt}: "
-                                f"profit={profit:.2f}, reason={reason}"
-                            )
-                            alert_trade_closed(
-                                strategy  = strat,
-                                symbol    = sym,
-                                direction = direc,
-                                profit    = profit,
-                                reason    = reason
-                            )
+                        # Actualizar estadísticas y aprendizaje ML SOLO si el P&L se
+                        # resolvió — evita registrar un "win" falso con profit=0 desconocido.
+                        if resolved:
+                            try:
+                                self.update_stats(profit, ticket=tkt)
+                            except Exception as _se:
+                                logger.debug(f"update_stats (SL/TP) error: {_se}")
+                            if _SF_AVAILABLE:
+                                ctx = self._pending_signal_context.pop(sym, None)
+                                if ctx:
+                                    try:
+                                        _signal_filter.record_outcome(
+                                            self._strategy_id or self.name, ctx,
+                                            won=(profit >= 0)
+                                        )
+                                    except Exception as _sf_e:
+                                        logger.debug(f"record_outcome (SL/TP) error: {_sf_e}")
+                        else:
+                            # Sin P&L resoluble: descartar contexto/RR para no contaminar
+                            self._pending_signal_context.pop(sym, None)
+                            self._pending_rr.pop(tkt, None)
 
-                        import threading as _th
-                        _th.Thread(
-                            target=_send_sltp_alert,
-                            args=(_strategy_name, _symbol, _direction, _ticket),
-                            daemon=True
-                        ).start()
+                        logger.info(
+                            f"Cierre SL/TP {sym} ticket={tkt}: "
+                            f"profit={profit:.2f}, reason={reason}, registrado={resolved}"
+                        )
 
-                    except Exception as e:
-                        logger.debug(f"Telegram SL/TP alert error: {e}")
+                        # Alerta Telegram (opcional — no bloquea el registro de stats)
+                        if _TELEGRAM_AVAILABLE:
+                            try:
+                                alert_trade_closed(
+                                    strategy  = strat,
+                                    symbol    = sym,
+                                    direction = direc,
+                                    profit    = profit,
+                                    reason    = reason
+                                )
+                            except Exception as _te:
+                                logger.debug(f"Telegram SL/TP alert error: {_te}")
+
+                    import threading as _th
+                    _th.Thread(
+                        target=_handle_mt5_close,
+                        args=(_strategy_name, _symbol, _direction, _ticket, _last_profit),
+                        daemon=True
+                    ).start()
+
+                except Exception as e:
+                    logger.debug(f"Handler cierre SL/TP error: {e}")
+
                 # Remover de posiciones conocidas
                 self._known_positions.pop(ticket, None)
+                self._partial_tp_done.pop(ticket, None)
+                self._trailing_sl.pop(ticket, None)
 
         for position in positions:
             if position.magic_number != self.magic_number:
                 continue
 
-            # Registrar como posicion conocida
+            # Registrar como posicion conocida y actualizar profit flotante
             if position.ticket not in self._known_positions:
+                # Capturar el riesgo inicial (distancia entrada→SL) para el TP parcial.
+                # En la primera vista el SL aún es el original (trailing no lo ha movido).
+                initial_sl = position.stop_loss or 0
+                risk_dist  = abs(position.price_open - initial_sl) if initial_sl else 0.0
                 self._known_positions[position.ticket] = {
-                    'symbol': position.symbol,
-                    'type':   position.type,
+                    'symbol':    position.symbol,
+                    'type':      position.type,
+                    'risk_dist': risk_dist,
                 }
+            # Guardar último profit flotante como fallback para notificaciones SL/TP
+            self._known_positions[position.ticket]['last_profit'] = (
+                position.profit + getattr(position, 'swap', 0.0) + getattr(position, 'commission', 0.0)
+            )
 
             # Guard edad minima
             if not self._is_position_old_enough(position.ticket):
                 continue
+
+            # Take-profit parcial + breakeven al alcanzar 1R (antes del trailing,
+            # para que el trailing solo mejore por encima del breakeven ya fijado)
+            self._check_partial_take_profit(position)
 
             # Trailing stop
             self._update_trailing_stop(position)
@@ -1299,6 +1490,8 @@ class StrategyBase(ABC):
 
         # Limpiar de posiciones conocidas (evita doble alerta si el bot también detecta el cierre)
         self._known_positions.pop(position.ticket, None)
+        self._partial_tp_done.pop(position.ticket, None)
+        self._trailing_sl.pop(position.ticket, None)
 
         # Alerta Telegram
         if _TELEGRAM_AVAILABLE:
@@ -1403,6 +1596,8 @@ class StrategyBase(ABC):
             .replace(" ", "_")
             .replace("+", "")
             .replace("-", "_")
+            .replace("/", "_")     # evita que "/" se interprete como separador de path
+            .replace("\\", "_")
         )
         return Path(f"stats_{bot_id}.json")
 
