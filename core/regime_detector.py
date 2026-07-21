@@ -86,6 +86,22 @@ STRATEGIES_BY_REGIME = {
 MAX_BOTS_PER_SYMBOL = 3
 
 # ---------------------------------------------------------------------------
+# Veto de combinaciones estrategia×símbolo tóxicas (backtest 1 año, motor
+# corregido — 2026-07-20). Estas 6 combinaciones son perdedoras ESTRUCTURALES
+# (P&L < -43%, profit factor < 0.83): pierden de forma consistente sin importar
+# el régimen, y ni los filtros en vivo las salvarían. El RegimeDetector nunca
+# las inicia aunque el régimen las sugiera. Revisar/ajustar con nuevos backtests.
+# ---------------------------------------------------------------------------
+SYMBOL_STRATEGY_BLOCKLIST = {
+    ('FVG',        'USDCAD'),   # -56% PF 0.71
+    ('FVG',        'AUDUSD'),   # -55% PF 0.79
+    ('SUPERTREND', 'AUDUSD'),   # -50% PF 0.58
+    ('EMA_CROSS',  'GBPUSD'),   # -48% PF 0.60
+    ('WILLIAMS_R', 'USDJPY'),   # -45% PF 0.56
+    ('FVG',        'GBPUSD'),   # -44% PF 0.82
+}
+
+# ---------------------------------------------------------------------------
 # Filtro de rendimiento por bot
 # Un bot con historial suficiente y WR bajo no se inicia aunque el régimen sea
 # correcto. Se re-evalúa en cada ciclo (cada 4h), por lo que un bot bloqueado
@@ -581,12 +597,17 @@ class RegimeDetector:
         (can_start: bool, reason: str)
 
         Orden de evaluación:
+          0. Combinación en el blocklist tóxico → nunca iniciar.
           1. Pausa por rendimiento activa → bloquear hasta que expire.
           2. Pausa expirada → segunda oportunidad: limpiar bloqueo y permitir.
           3. WR de ventana deslizante < PERFORMANCE_MIN_WR → no iniciar.
           4. Pocos datos (< PERFORMANCE_MIN_TRADES) → permitir (bot nuevo).
           5. WR aceptable → permitir.
         """
+        # 0. Veto permanente de combinaciones tóxicas (backtest estructural)
+        if (strategy_type, symbol) in SYMBOL_STRATEGY_BLOCKLIST:
+            return False, "combinación vetada (perdedora estructural en backtest)"
+
         strategy_id   = f"{strategy_type}_{symbol}"
         blocked_until = self._performance_blocked.get(strategy_id)
 
@@ -639,6 +660,10 @@ class RegimeDetector:
         Prioriza el WR de la ventana deslizante (más relevante) sobre el WR total.
         Umbral de parada es más permisivo que el de inicio para evitar churning.
         """
+        # Combinación vetada que quedó activa (auto-arranque o ciclo previo) → detener
+        if (strategy_type, symbol) in SYMBOL_STRATEGY_BLOCKLIST:
+            return True, "combinación vetada (perdedora estructural en backtest)"
+
         stats        = self._load_bot_stats(strategy_type, symbol)
         recent_wr    = stats['recent_win_rate']
         recent_count = stats['recent_count']
