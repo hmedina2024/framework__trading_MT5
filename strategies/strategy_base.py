@@ -1406,6 +1406,18 @@ class StrategyBase(ABC):
                     'type':      position.type,
                     'risk_dist': risk_dist,
                 }
+                # Si el ticket no pasó por on_trade_opened() en esta sesión (no está
+                # en _position_open_times), es una posición que sobrevivió a un
+                # reinicio del servidor — este bot nunca contó su apertura. Sin este
+                # ajuste, cuando cierre se registraría wins/losses sin haber sumado
+                # trades_count, dejando stats_*.json con trades_count=0 y wins/losses>0
+                # (detectado como "Stats inconsistentes" al recargar y descartado).
+                if position.ticket not in self._position_open_times:
+                    self._stats["trades_count"] += 1
+                    logger.info(
+                        f"{self.name} | {position.symbol}: posición {position.ticket} "
+                        f"preexistente (sobrevivió a un reinicio) — contabilizada en trades_count"
+                    )
             # Guardar último profit flotante como fallback para notificaciones SL/TP
             self._known_positions[position.ticket]['last_profit'] = (
                 position.profit + getattr(position, 'swap', 0.0) + getattr(position, 'commission', 0.0)
@@ -1679,12 +1691,18 @@ class StrategyBase(ABC):
             loaded_wins   = int(data.get("wins", 0))
             loaded_losses = int(data.get("losses", 0))
 
-            # Validación mínima: wins + losses no puede superar trades_count
+            # Reparación: wins + losses no puede superar trades_count. Puede pasar
+            # cuando una posición sobrevive a un reinicio del servidor y cierra
+            # antes del fix que contabiliza su apertura al descubrirla. En vez de
+            # descartar todo el historial (como antes), se sube trades_count al
+            # mínimo consistente — se conserva el resto de las stats acumuladas.
             if loaded_wins + loaded_losses > loaded_count:
-                raise ValueError(
-                    f"Stats inconsistentes: wins({loaded_wins}) + "
-                    f"losses({loaded_losses}) > trades_count({loaded_count})"
+                logger.warning(
+                    f"'{self.name}': stats reparadas — trades_count({loaded_count}) "
+                    f"< wins({loaded_wins})+losses({loaded_losses}), ajustado a "
+                    f"{loaded_wins + loaded_losses}"
                 )
+                loaded_count = loaded_wins + loaded_losses
 
             self._stats["trades_count"]   = loaded_count
             self._stats["wins"]           = loaded_wins

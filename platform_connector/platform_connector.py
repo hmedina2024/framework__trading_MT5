@@ -172,9 +172,9 @@ class PlatformConnector:
                     info = mt5.account_info()
                     if info is not None:
                         return True
-                    logger.error(f"DEBUG is_connected intento {attempt}: account_info=None, last_error={mt5.last_error()}, thread={threading.current_thread().name}")
+                    logger.debug(f"is_connected intento {attempt}: account_info=None, last_error={mt5.last_error()}")
                 except Exception as e:
-                    logger.error(f"DEBUG is_connected intento {attempt}: excepcion {e!r}, thread={threading.current_thread().name}")
+                    logger.debug(f"is_connected intento {attempt}: excepcion {e!r}")
                 if attempt < 2:
                     time.sleep(0.3)
             logger.warning("MT5 desconectado externamente — marcando para reconexión")
