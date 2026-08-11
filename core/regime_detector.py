@@ -99,6 +99,12 @@ SYMBOL_STRATEGY_BLOCKLIST = {
     ('EMA_CROSS',  'GBPUSD'),   # -48% PF 0.60
     ('WILLIAMS_R', 'USDJPY'),   # -45% PF 0.56
     ('FVG',        'GBPUSD'),   # -44% PF 0.82
+    # Agregado 2026-08-11: FVG solo muestra filo real en XAUUSD/cripto —
+    # en EURUSD fue marginal en backtest (-18.5% PF 0.96) y en vivo confirma
+    # el mismo patrón (0W/1L). No es tóxico estructural como los de arriba,
+    # pero se saca para liberar el slot a MACD/EMA_CROSS en EURUSD, que sí
+    # tienen filo confirmado ahí.
+    ('FVG',        'EURUSD'),   # -18.5% PF 0.96 (backtest) + 0W/1L (vivo)
 }
 
 # ---------------------------------------------------------------------------
