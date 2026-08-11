@@ -53,6 +53,15 @@ except ImportError:
     _signal_filter = None
     _SF_AVAILABLE = False
 
+# Filtro de sesgo fundamental por IA — opcional; sin ANTHROPIC_API_KEY o sin
+# el paquete anthropic instalado, no bloquea el trading (fail-open).
+try:
+    from core.news_sentiment import news_sentiment_filter as _news_sentiment_filter
+    _NS_AVAILABLE = True
+except ImportError:
+    _news_sentiment_filter = None
+    _NS_AVAILABLE = False
+
 # ---------------------------------------------------------------------------
 # Parametros de proteccion — ajustar segun necesidades
 # ---------------------------------------------------------------------------
@@ -907,6 +916,23 @@ class StrategyBase(ABC):
                         return False
                 except Exception as _sf_e:
                     logger.debug(f"SignalFilter error (ignorado): {_sf_e}")
+
+            # 0g. Sesgo fundamental por IA — veta si la dirección de la señal
+            # contradice el sesgo fundamental reciente (noticias de alto impacto)
+            # de las divisas del símbolo. Reutiliza el mismo calendario cacheado
+            # que el blackout binario (0c). Fail-open: sin API key, sin eventos
+            # relevantes, o ante cualquier error, no bloquea nada.
+            if _NS_AVAILABLE:
+                try:
+                    events = self._fetch_news_calendar()
+                    blocked, ns_reason = _news_sentiment_filter.should_block_entry(
+                        symbol, signal.get('direction', ''), events
+                    )
+                    if blocked:
+                        logger.info(f"{self.name} | {symbol}: señal vetada — {ns_reason}")
+                        return False
+                except Exception as _ns_e:
+                    logger.debug(f"NewsSentimentFilter error (ignorado): {_ns_e}")
 
             # 1. Posicion ya abierta por este bot
             if self._has_open_position(symbol):
