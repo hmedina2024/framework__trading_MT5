@@ -69,6 +69,16 @@ async def lifespan(app: FastAPI):
                 trading_service.regime_detector.start_scheduler
             )
             logger.info("📈 RegimeDetector scheduler iniciado")
+
+        # Reporte semanal (lunes 08:00 UTC) por Telegram — con resumen IA si
+        # ANTHROPIC_API_KEY está configurada, formato fijo si no.
+        try:
+            from core.weekly_report import WeeklyReportScheduler
+            weekly_report_scheduler = WeeklyReportScheduler(trading_service.connector)
+            weekly_report_scheduler.start()
+            app.state.weekly_report_scheduler = weekly_report_scheduler
+        except Exception as e:
+            logger.warning(f"No se pudo iniciar WeeklyReportScheduler: {e}")
     else:
         logger.warning("⚠️ Servicio de trading no pudo conectar a MT5 al inicio")
     

@@ -17,3 +17,6 @@ numpy>=1.24.0
 lightgbm>=4.0.0
 scikit-learn>=1.3.0
 certifi>=2024.0.0
+
+# Reporte semanal con IA (optional: if not installed or no API key, fixed-format fallback is used)
+anthropic>=0.40.0
