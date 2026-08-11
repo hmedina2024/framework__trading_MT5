@@ -320,6 +320,21 @@ class TradingService:
             )
             return False
 
+        # Veto de combinaciones tóxicas (SYMBOL_STRATEGY_BLOCKLIST en
+        # regime_detector). Antes solo lo respetaba el ciclo periódico del
+        # RegimeDetector (cada 4h) — el auto-arranque al iniciar el servidor
+        # llamaba aquí directamente y podía revivir un bot recién vetado si
+        # seguía en bots_config.json. Chequearlo en este único punto de
+        # entrada cubre todos los caminos: auto-arranque, API manual y
+        # RegimeDetector por igual.
+        from core.regime_detector import SYMBOL_STRATEGY_BLOCKLIST
+        if (strategy_type, symbol) in SYMBOL_STRATEGY_BLOCKLIST:
+            logger.warning(
+                f"No se inicia {strategy_type}_{symbol}: combinación vetada "
+                f"(perdedora estructural en backtest)"
+            )
+            return False
+
         strategy_id = f"{strategy_type}_{symbol}"
 
         if strategy_id in self.active_strategies:
