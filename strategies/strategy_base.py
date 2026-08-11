@@ -477,9 +477,14 @@ class StrategyBase(ABC):
             )
             with urllib.request.urlopen(req, timeout=5) as resp:
                 raw = json.loads(resp.read().decode('utf-8'))
+            # El esquema real del endpoint es {title, country, date, impact,
+            # forecast, previous} — 'date' ya viene con hora y offset ISO 8601
+            # (ej. "2026-08-11T00:30:00-04:00"). NO existe un campo 'time'
+            # separado (bug histórico: se esperaba uno y por eso el blackout
+            # nunca bloqueaba nada — ver _is_news_blackout).
             high_impact = [
                 {'title': e.get('title',''), 'country': e.get('country',''),
-                 'date': e.get('date',''), 'time': e.get('time','')}
+                 'date': e.get('date','')}
                 for e in raw if e.get('impact','').lower() == 'high'
             ]
             self._news_cache      = high_impact
@@ -505,13 +510,10 @@ class StrategyBase(ABC):
             now_utc = datetime.now(timezone.utc)
             for event in events:
                 date_str = event.get('date', '')
-                time_str = event.get('time', '')
-                if not date_str or not time_str:
+                if not date_str:
                     continue
                 try:
-                    event_dt = datetime.strptime(
-                        f"{date_str} {time_str}", "%m-%d-%Y %I:%M%p"
-                    ).replace(tzinfo=timezone.utc)
+                    event_dt = datetime.fromisoformat(date_str).astimezone(timezone.utc)
                 except ValueError:
                     continue
                 diff_min = (now_utc - event_dt).total_seconds() / 60

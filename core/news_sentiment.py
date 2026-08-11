@@ -91,13 +91,14 @@ class NewsSentimentFilter:
         for e in events:
             if _COUNTRY_TO_CURRENCY.get(e.get('country', '')) != currency:
                 continue
-            date_str, time_str = e.get('date', ''), e.get('time', '')
-            if not date_str or not time_str:
+            # El esquema real del endpoint es {title, country, date, impact,
+            # forecast, previous} — 'date' ya viene con hora y offset ISO 8601
+            # (ej. "2026-08-11T00:30:00-04:00"). No existe un campo 'time' separado.
+            date_str = e.get('date', '')
+            if not date_str:
                 continue
             try:
-                event_dt = datetime.strptime(
-                    f"{date_str} {time_str}", "%m-%d-%Y %I:%M%p"
-                ).replace(tzinfo=timezone.utc)
+                event_dt = datetime.fromisoformat(date_str).astimezone(timezone.utc)
             except ValueError:
                 continue
             hours_diff = (now_utc - event_dt).total_seconds() / 3600
