@@ -105,6 +105,10 @@ SYMBOL_STRATEGY_BLOCKLIST = {
     # pero se saca para liberar el slot a MACD/EMA_CROSS en EURUSD, que sí
     # tienen filo confirmado ahí.
     ('FVG',        'EURUSD'),   # -18.5% PF 0.96 (backtest) + 0W/1L (vivo)
+    # Agregado 2026-08-13: se coló en el auto-arranque sin haber sido
+    # evaluado al armar la blocklist original — backtest peor que los
+    # 4 combos "marginales" que se dejaron correr para juntar más datos.
+    ('MACD',       'BTCUSD'),   # -27.2% PF 0.83 (backtest)
 }
 
 # ---------------------------------------------------------------------------
