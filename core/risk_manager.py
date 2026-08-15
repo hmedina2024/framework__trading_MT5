@@ -20,6 +20,13 @@ BALANCE_STATE_FILE = Path("balance_state.json")
 # 2 pips). Es un cap de seguridad independiente del riesgo % por trade.
 MAX_MARGIN_PER_TRADE_PCT = 0.25
 
+# Tolerancia al forzar el volumen al mínimo del bróker: si el SL calculado
+# por ATR es angosto en relación al lote mínimo tradeable (típico en XAUUSD
+# con cuentas chicas), el riesgo real puede superar por mucho el % objetivo.
+# Si el riesgo forzado excede este múltiplo del objetivo, se rechaza el
+# trade en vez de tomarlo silenciosamente sobre-arriesgado.
+MAX_MIN_LOT_RISK_MULTIPLIER = 1.5
+
 # ---------------------------------------------------------------------------
 # Modo demo: False en producción para que el límite de pérdida diaria aplique.
 # Cambia a True únicamente para pruebas sin restricciones de drawdown diario.
@@ -249,9 +256,22 @@ class RiskManager:
             return None
         volume = risk_money / risk_per_lot
         volume = symbol_info.normalize_volume(volume)
-        if volume < symbol_info.volume_min:
+        if volume <= symbol_info.volume_min:
+            forced_risk = symbol_info.volume_min * risk_per_lot
+            if forced_risk > risk_money * MAX_MIN_LOT_RISK_MULTIPLIER:
+                logger.warning(
+                    f"{symbol}: SL demasiado angosto para el lote mínimo — "
+                    f"riesgo forzado ${forced_risk:.2f} excede {MAX_MIN_LOT_RISK_MULTIPLIER}x "
+                    f"el objetivo (${risk_money:.2f}, {risk_pct*100:.1f}%). Señal rechazada."
+                )
+                return None
             volume = symbol_info.volume_min
-            logger.warning(f"Volumen ajustado al mínimo permitido: {volume} lotes")
+            if forced_risk > risk_money:
+                logger.warning(
+                    f"{symbol}: volumen ajustado al mínimo permitido ({volume} lotes) — "
+                    f"riesgo real ${forced_risk:.2f} ({forced_risk/account_info.equity*100:.2f}%) "
+                    f"supera el objetivo de {risk_pct*100:.1f}%"
+                )
         market_data = self.connector.get_market_data(symbol)
 
         # Cap de seguridad por margen: limitar el lotaje para que una sola posición
