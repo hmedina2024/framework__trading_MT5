@@ -11,13 +11,17 @@ de las estrategias y mantiene la conexión a MT5) quedó huérfano — sin
 puerto, invisible a /health, pero completamente vivo y operando.
 
 Este lock hace que un segundo worker se niegue a arrancar si el PID del
-lock sigue vivo Y su línea de comandos coincide con la nuestra (evita
-falsos positivos si Windows reutiliza el mismo PID para un proceso
-no relacionado).
+lock sigue vivo. Se identifica al proceso por PID + create_time() (no por
+línea de comandos: en modo --reload, uvicorn spawnea el worker real vía
+multiprocessing, cuyo cmdline es un genérico "spawn_main(...)" que no
+distingue nuestro proceso de cualquier otro). create_time() es el momento
+exacto (con precisión de fracciones de segundo) en que el PID arrancó —
+si Windows reutiliza el mismo número de PID para un proceso no
+relacionado, su create_time será distinto y el lock se trata como
+huérfano en vez de bloquear un arranque legítimo.
 """
 from pathlib import Path
 import os
-import sys
 
 import psutil
 
@@ -32,12 +36,18 @@ class InstanceAlreadyRunningError(RuntimeError):
     pass
 
 
-def _cmdline_matches(pid: int) -> bool:
-    """True si el proceso con ese PID sigue vivo y parece ser este mismo servidor."""
+def _read_lock():
+    """Devuelve (pid, create_time) del lock existente, o None si no es válido."""
     try:
-        proc = psutil.Process(pid)
-        cmdline = " ".join(proc.cmdline()).lower()
-        return "run_server.py" in cmdline or "uvicorn" in cmdline
+        pid_str, ctime_str = LOCK_FILE.read_text().strip().split(",")
+        return int(pid_str), float(ctime_str)
+    except (ValueError, OSError):
+        return None
+
+
+def _is_same_process_still_alive(pid: int, create_time: float) -> bool:
+    try:
+        return abs(psutil.Process(pid).create_time() - create_time) < 1.0
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         return False
 
@@ -47,13 +57,10 @@ def acquire() -> None:
     Adquiere el lock de instancia única. Lanza InstanceAlreadyRunningError
     si ya hay otro worker vivo — quien llame debe abortar el arranque.
     """
-    if LOCK_FILE.exists():
-        try:
-            old_pid = int(LOCK_FILE.read_text().strip())
-        except (ValueError, OSError):
-            old_pid = None
-
-        if old_pid and _cmdline_matches(old_pid):
+    existing = _read_lock()
+    if existing:
+        old_pid, old_ctime = existing
+        if _is_same_process_still_alive(old_pid, old_ctime):
             raise InstanceAlreadyRunningError(
                 f"Ya hay una instancia del servidor corriendo (PID {old_pid}). "
                 f"Si estás seguro de que ya no está activa, detenla manualmente "
@@ -66,14 +73,17 @@ def acquire() -> None:
                 f"se reemplaza."
             )
 
-    LOCK_FILE.write_text(str(os.getpid()))
-    logger.info(f"Lock de instancia adquirido (PID {os.getpid()})")
+    my_pid = os.getpid()
+    my_ctime = psutil.Process(my_pid).create_time()
+    LOCK_FILE.write_text(f"{my_pid},{my_ctime}")
+    logger.info(f"Lock de instancia adquirido (PID {my_pid})")
 
 
 def release() -> None:
     """Libera el lock, solo si sigue siendo nuestro (evita borrar el de otra instancia)."""
     try:
-        if LOCK_FILE.exists() and LOCK_FILE.read_text().strip() == str(os.getpid()):
+        existing = _read_lock()
+        if existing and existing[0] == os.getpid():
             LOCK_FILE.unlink()
             logger.info("Lock de instancia liberado")
     except OSError as e:
