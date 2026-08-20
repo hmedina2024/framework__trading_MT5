@@ -34,7 +34,17 @@ connection_manager = ConnectionManager()
 async def lifespan(app: FastAPI):
     """Gestión del ciclo de vida de la aplicación"""
     logger.info("🚀 Iniciando servidor de Trading MT5...")
-    
+
+    # Lock de instancia única: evita que dos workers operen la MISMA cuenta
+    # MT5 en paralelo (ver core/instance_lock.py para el incidente que
+    # motivó esto — un worker huérfano estuvo duplicando trades 6 días).
+    from core.instance_lock import acquire as _acquire_lock, InstanceAlreadyRunningError
+    try:
+        _acquire_lock()
+    except InstanceAlreadyRunningError as e:
+        logger.critical(f"🔒 {e}")
+        raise
+
     # Inicializar servicio de trading al arrancar
     success = await trading_service.initialize()
     if success:
@@ -91,6 +101,8 @@ async def lifespan(app: FastAPI):
     # Cleanup al cerrar
     logger.info("🛑 Cerrando servidor de Trading MT5...")
     await trading_service.shutdown()
+    from core.instance_lock import release as _release_lock
+    _release_lock()
 
 
 # Crear aplicación FastAPI

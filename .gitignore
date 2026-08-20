@@ -51,6 +51,9 @@ trade_history/
 *.csv
 *.xlsx
 
+# Lock de instancia única (PID de un proceso vivo — no tiene sentido versionarlo)
+server.lock
+
 # Jupyter Notebook
 .ipynb_checkpoints
 
