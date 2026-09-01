@@ -1002,7 +1002,11 @@ class StrategyBase(ABC):
                 risk_percentage=scaled_risk
             )
             if not volume:
-                logger.error(f"No se pudo calcular tamanio de posicion para {symbol}")
+                # WARNING, no ERROR: la causa más común es un rechazo intencional
+                # del risk manager (ej. SL demasiado angosto para el lote mínimo
+                # del bróker) — ya queda con su propio detalle en ese log. No es
+                # necesariamente una falla.
+                logger.warning(f"No se pudo calcular tamanio de posicion para {symbol}")
                 return False
 
             # 7b. Vol-targeting: reducir tamaño si la volatilidad actual es mayor a la normal
