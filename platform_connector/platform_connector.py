@@ -292,6 +292,11 @@ class PlatformConnector:
 
         with self._mt5_lock:
             try:
+                # symbol_info_tick() devuelve None para símbolos que existen en
+                # el bróker pero no están seleccionados (visibles) en el Market
+                # Watch de la terminal — symbol_select() los activa (no-op si
+                # ya lo estaban).
+                mt5.symbol_select(symbol, True)
                 tick = mt5.symbol_info_tick(symbol)
                 if tick is None:
                     logger.error(f"No se pudo obtener tick para {symbol}: {mt5.last_error()}")
@@ -332,6 +337,7 @@ class PlatformConnector:
 
         with self._mt5_lock:
             try:
+                mt5.symbol_select(symbol, True)
                 info = mt5.symbol_info(symbol)
                 if info is None:
                     logger.error(f"No se pudo obtener info para {symbol}: {mt5.last_error()}")
@@ -404,6 +410,7 @@ class PlatformConnector:
 
         with self._mt5_lock:
             try:
+                mt5.symbol_select(symbol, True)
                 if count:
                     rates = mt5.copy_rates_from(symbol, timeframe, start_date, count)
                 elif end_date:
