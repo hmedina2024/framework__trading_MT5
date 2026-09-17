@@ -44,17 +44,24 @@ if __name__ == "__main__":
 
     threading.Thread(target=open_browser, daemon=True).start()
 
-    # Iniciar servidor Uvicorn
-    # reload=True permite reiniciar el servidor automáticamente al cambiar código.
-    # reload_dirs limita la vigilancia al código Python del backend: sin esto,
-    # uvicorn vigila TODO el proyecto incluida frontend/, y cualquier edición de
-    # JS/HTML reinicia el proceso completo, tumbando la conexión MT5 y los bots
-    # activos (el frontend son archivos estáticos, no necesitan reload de Python).
+    # reload=True (uvicorn --reload) spawnea el worker real vía multiprocessing
+    # y lo relanza cuando detecta cambios en reload_dirs. En este proyecto los
+    # reinicios tras editar código siempre se hacen a mano (matando el árbol
+    # completo del proceso), nunca dependiendo de este mecanismo — y dos
+    # incidentes reales ya salieron de él: (1) al matar solo el proceso
+    # "reloader" padre, el worker hijo quedó huérfano operando en vivo 6 días
+    # sin que nadie lo supiera (ver core/instance_lock.py); (2) se observaron
+    # decenas de procesos multiprocessing-fork acumulados tras ~2 días de
+    # uptime sin ningún cambio real de archivos de por medio. Sin beneficio
+    # real y con historial de causar bugs de duplicación — se desactiva por
+    # default. RELOAD=true en .env lo reactiva para sesiones de desarrollo
+    # activo si alguna vez hace falta.
+    reload_enabled = os.getenv("RELOAD", "false").lower() == "true"
     uvicorn.run(
         "api.main:app",
         host="0.0.0.0",
         port=PORT,
-        reload=True,
-        reload_dirs=["api", "core", "strategies", "models", "platform_connector", "utils", "config"],
+        reload=reload_enabled,
+        reload_dirs=["api", "core", "strategies", "models", "platform_connector", "utils", "config"] if reload_enabled else None,
         log_level="info"
     )
