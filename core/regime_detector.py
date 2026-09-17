@@ -290,7 +290,9 @@ class RegimeDetector:
             bb_upper, bb_middle, bb_lower = self.market_analyzer.calculate_bollinger_bands(df, 20, 2.0)
             bb_width     = (bb_upper.iloc[-1] - bb_lower.iloc[-1]) / bb_middle.iloc[-1] * 100
             bb_width_avg = ((bb_upper - bb_lower) / bb_middle * 100).iloc[-20:].mean()
-            bb_squeeze   = bb_width < (bb_width_avg * 0.8)
+            # bool() explícito: la comparación entre escalares numpy da numpy.bool_,
+            # que no es serializable a JSON (rompía GET /strategies/regime con 500).
+            bb_squeeze   = bool(bb_width < (bb_width_avg * 0.8))
 
             # ----------------------------------------------------------------
             # Clasificación en 5 niveles con histéresis respecto al régimen anterior
