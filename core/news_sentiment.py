@@ -103,20 +103,36 @@ class NewsSentimentFilter:
                 continue
             hours_diff = (now_utc - event_dt).total_seconds() / 3600
             if -2 <= hours_diff <= RELEVANT_EVENT_WINDOW_HOURS:  # ya pasó (hasta 24h) o es inminente (hasta 2h antes)
-                relevant.append(e.get('title', ''))
+                # El feed no publica el valor "actual" tras el release — solo
+                # forecast/previous. Para eventos ya ocurridos eso no revela el
+                # resultado; para eventos próximos sí es una señal real (el
+                # mercado ya está descontando la diferencia forecast/previous).
+                status = 'PRÓXIMO' if hours_diff < 0 else 'YA OCURRIÓ (resultado no disponible)'
+                forecast = e.get('forecast', '') or 'sin dato'
+                previous = e.get('previous', '') or 'sin dato'
+                relevant.append(
+                    f"{e.get('title', '')} [{status}] — forecast: {forecast}, previous: {previous}"
+                )
 
         if not relevant:
             return None  # sin eventos relevantes recientes — no vale la pena llamar a la API
 
-        prompt = f"""Eres un analista forex. Con base ÚNICAMENTE en estos eventos
-económicos de alto impacto recientes/próximos para {currency}, responde en
-UNA sola línea con este formato exacto:
+        prompt = f"""Eres un analista forex. Con base en estos eventos económicos
+de alto impacto recientes/próximos para {currency}, responde en UNA sola
+línea con este formato exacto:
 SESGO: [BULLISH|BEARISH|NEUTRAL] | RAZON: [máximo 15 palabras]
 
 Eventos:
-{chr(10).join(f'- {t}' for t in relevant)}
+{chr(10).join(f'- {e}' for e in relevant)}
 
-Si los eventos son mixtos, no hay dirección clara, o ya son ambiguos, usa NEUTRAL."""
+Para eventos PRÓXIMOS: si forecast difiere claramente de previous, el mercado
+ya está descontando esa dirección — úsala para dar SESGO, no te limites a NEUTRAL
+solo porque el evento no ha ocurrido todavía.
+Para eventos YA OCURRIDOS sin resultado disponible: no inventes un resultado,
+pero puedes opinar si el tipo de evento y su importancia relativa ya sugieren
+un sesgo direccional razonable.
+Usa NEUTRAL solo cuando de verdad no haya ninguna base razonable para inclinarte
+(forecast=previous, datos mixtos entre eventos, o sin información alguna)."""
 
         try:
             client = anthropic.Anthropic(api_key=api_key)

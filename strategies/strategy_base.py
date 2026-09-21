@@ -482,9 +482,13 @@ class StrategyBase(ABC):
             # (ej. "2026-08-11T00:30:00-04:00"). NO existe un campo 'time'
             # separado (bug histórico: se esperaba uno y por eso el blackout
             # nunca bloqueaba nada — ver _is_news_blackout).
+            # forecast/previous se guardan para el filtro de sesgo por IA — el
+            # feed no publica el valor "actual" tras el release, así que son
+            # el único contexto cuantitativo disponible.
             high_impact = [
                 {'title': e.get('title',''), 'country': e.get('country',''),
-                 'date': e.get('date','')}
+                 'date': e.get('date',''), 'forecast': e.get('forecast',''),
+                 'previous': e.get('previous','')}
                 for e in raw if e.get('impact','').lower() == 'high'
             ]
             self._news_cache      = high_impact
