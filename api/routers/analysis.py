@@ -75,6 +75,22 @@ async def get_ml_status():
         raise HTTPException(status_code=500, detail=f"Error obteniendo estado ML: {e}")
 
 
+@router.get("/news-prediction-status")
+async def get_news_prediction_status():
+    """
+    Precisión del filtro de sesgo por IA: cuántas predicciones se han resuelto,
+    cuántas acertaron contra el movimiento real del par proxy, desglosado por
+    tipo de sesgo (BULLISH/BEARISH/NEUTRAL). Puramente informativo — hoy el
+    filtro solo veta entradas, este tracker mide si tendría sentido darle más
+    peso en el futuro.
+    """
+    try:
+        from core.news_prediction_tracker import news_prediction_tracker
+        return news_prediction_tracker.get_stats()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error obteniendo estado del tracker: {e}")
+
+
 def _reconstruct_context(connector, market_analyzer, trade, win_rate):
     """
     Reconstruye el dict de features de un trade histórico, replicando la forma

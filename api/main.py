@@ -89,6 +89,16 @@ async def lifespan(app: FastAPI):
             app.state.weekly_report_scheduler = weekly_report_scheduler
         except Exception as e:
             logger.warning(f"No se pudo iniciar WeeklyReportScheduler: {e}")
+
+        # Tracker de precisión del filtro de sesgo por IA: registra cada
+        # predicción y la compara contra el precio real horas después. No
+        # afecta el trading — solo acumula evidencia de si acierta más de lo
+        # que falla, antes de considerar usarlo para algo más que un veto.
+        try:
+            from core.news_prediction_tracker import news_prediction_tracker
+            news_prediction_tracker.start_scheduler(trading_service.connector)
+        except Exception as e:
+            logger.warning(f"No se pudo iniciar NewsPredictionTracker: {e}")
     else:
         logger.warning("⚠️ Servicio de trading no pudo conectar a MT5 al inicio")
     

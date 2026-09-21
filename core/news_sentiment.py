@@ -29,6 +29,12 @@ try:
 except ImportError:
     _ANTHROPIC_AVAILABLE = False
 
+try:
+    from core.news_prediction_tracker import news_prediction_tracker
+    _TRACKER_AVAILABLE = True
+except ImportError:
+    _TRACKER_AVAILABLE = False
+
 MODEL                          = "claude-haiku-4-5-20251001"
 NEWS_SENTIMENT_CACHE_MINUTES   = 60     # igual que el cache del calendario en strategy_base
 RELEVANT_EVENT_WINDOW_HOURS    = 24     # considera eventos de las ultimas 24h (no solo el blackout de 30min)
@@ -150,6 +156,11 @@ Usa NEUTRAL solo cuando de verdad no haya ninguna base razonable para inclinarte
             with self._data_lock:
                 self._cache[currency] = result
             logger.info(f"Sesgo fundamental {currency}: {bias} — {text}")
+            if _TRACKER_AVAILABLE:
+                try:
+                    news_prediction_tracker.record(currency, bias, text)
+                except Exception as _track_e:
+                    logger.debug(f"NewsPredictionTracker.record error (ignorado): {_track_e}")
             return result
         except Exception as e:
             logger.debug(f"NewsSentimentFilter: error consultando IA para {currency}: {e}")
