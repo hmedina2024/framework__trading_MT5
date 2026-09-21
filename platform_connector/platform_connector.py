@@ -465,6 +465,7 @@ class PlatformConnector:
                     210000: 'MA_CROSS',  220000: 'RSI',       230000: 'BOLLINGER',
                     240000: 'MACD',      250000: 'BREAKOUT',  260000: 'SUPERTREND',
                     270000: 'EMA_CROSS', 280000: 'WILLIAMS_R', 300000: 'LONDON_ORB',
+                    310000: 'FVG',       320000: 'NY_ORB',
                 }
                 for base, name in bases.items():
                     for offset in range(1, 10):
@@ -497,6 +498,8 @@ class PlatformConnector:
                         elif 'LONDON ORB'  in c or 'LONDON_ORB' in c: strategy_name = 'LONDON_ORB'
                         elif 'MA CROSS'    in c or 'MA_CROSS'  in c: strategy_name = 'MA_CROSS'
                         elif 'RSI'         in c:                      strategy_name = 'RSI'
+                        elif 'FAIR VALUE'  in c or 'FVG'       in c: strategy_name = 'FVG'
+                        elif 'NY OPEN ORB' in c or 'NY_ORB'    in c: strategy_name = 'NY_ORB'
                         else: strategy_name = None
 
                     if not strategy_name:
