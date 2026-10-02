@@ -79,12 +79,21 @@ class NewsSentimentFilter:
         Retorna {'bias': 'BULLISH'|'BEARISH'|'NEUTRAL', 'reasoning': str} para
         la divisa, o None si no hay eventos recientes relevantes o falla.
         Usa cache — no vuelve a llamar a la API dentro de la misma ventana.
+
+        Mantiene _data_lock durante TODO el método (chequeo + llamada a la API
+        + escritura) — antes el lock se soltaba entre el chequeo y la llamada,
+        y dos bots pidiendo el sesgo casi al mismo tiempo podían ver el cache
+        vencido antes de que ninguno lo actualizara, duplicando la llamada a
+        la API (costo extra) y la predicción registrada en el tracker.
         """
         with self._data_lock:
             cached = self._cache.get(currency)
             if cached and (datetime.now(timezone.utc) - cached['cached_at']).total_seconds() < NEWS_SENTIMENT_CACHE_MINUTES * 60:
                 return cached
+            return self._fetch_fresh_bias(currency, events)
 
+    def _fetch_fresh_bias(self, currency: str, events: List[Dict]) -> Optional[Dict]:
+        """Llamada real a la API — se asume invocada con _data_lock ya tomado."""
         if not _ANTHROPIC_AVAILABLE:
             return None
         api_key = os.getenv("ANTHROPIC_API_KEY")
