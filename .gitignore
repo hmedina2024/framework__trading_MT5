@@ -1,3 +1,7 @@
+# Credenciales y notas personales — NUNCA versionar (ver incidente: Info.txt
+# estuvo expuesto en el repo público con password de administrador de AWS)
+Info.txt
+
 # Python
 __pycache__/
 *.py[cod]
