@@ -90,6 +90,17 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"No se pudo iniciar WeeklyReportScheduler: {e}")
 
+        # Reconciliación periódica de stats_*.json contra el historial real de
+        # MT5 — corrige el hueco de trades que cierran después de que su bot
+        # fue detenido por rotación de régimen (ver core/stats_reconciler.py).
+        try:
+            from core.stats_reconciler import StatsReconcilerScheduler
+            stats_reconciler_scheduler = StatsReconcilerScheduler(trading_service.connector)
+            stats_reconciler_scheduler.start()
+            app.state.stats_reconciler_scheduler = stats_reconciler_scheduler
+        except Exception as e:
+            logger.warning(f"No se pudo iniciar StatsReconcilerScheduler: {e}")
+
         # Tracker de precisión del filtro de sesgo por IA: registra cada
         # predicción y la compara contra el precio real horas después. No
         # afecta el trading — solo acumula evidencia de si acierta más de lo

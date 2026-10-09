@@ -230,72 +230,19 @@ async def stats_backfill(days: int = 120, service: TradingService = Depends(get_
     igual que update_stats() en vivo.
 
     Idempotente: sobrescribe con la verdad del historial MT5 (fuente autoritativa).
-    Recomendado ejecutarlo una vez tras el despliegue.
+    También corre automáticamente cada 4h vía StatsReconcilerScheduler (ver
+    core/stats_reconciler.py) — este endpoint sirve para forzarlo a demanda.
     """
-    import json
-    from pathlib import Path
-    from strategies.strategy_base import ROLLING_WINDOW_SIZE
+    from core.stats_reconciler import reconcile_stats
 
     connector = service.connector
-    if connector is None or not connector.is_connected():
-        raise HTTPException(status_code=503, detail="MT5 no está conectado")
-
     try:
-        date_from = datetime.now() - timedelta(days=days)
-        trades = connector.get_closed_trades(from_date=date_from)
-        if not trades:
-            return {"message": "No se encontraron trades cerrados en el rango", "archivos": 0}
-
-        # strategy_id -> {'wins', 'losses', 'results': [1/0 cronológico]}
-        by_bot = {}
-        skipped_foreign = 0
-
-        for t in trades:  # get_closed_trades ya viene ordenado por entry_time
-            base = (t['magic'] // 10000) * 10000
-            strategy_type = _MAGIC_BASE_TO_STRATEGY.get(base)
-            if not strategy_type:
-                skipped_foreign += 1
-                continue
-
-            strategy_id = f"{strategy_type}_{t['symbol']}"
-            bucket = by_bot.setdefault(strategy_id, {'wins': 0, 'losses': 0, 'results': []})
-            won = t['profit'] >= 0
-            if won:
-                bucket['wins'] += 1
-            else:
-                bucket['losses'] += 1
-            bucket['results'].append(1 if won else 0)
-
-        written = []
-        for strategy_id, b in by_bot.items():
-            total = b['wins'] + b['losses']
-            payload = {
-                "strategy_id":    strategy_id,
-                "trades_count":   total,
-                "wins":           b['wins'],
-                "losses":         b['losses'],
-                "avg_rr":         0.0,  # se afina con trades en vivo
-                "recent_results": b['results'][-ROLLING_WINDOW_SIZE:],
-                "last_updated":   datetime.now().isoformat(),
-                "source":         "mt5_stats_backfill",
-            }
-            Path(f"stats_{strategy_id}.json").write_text(
-                json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
-            wr = round(b['wins'] / total * 100, 1) if total else 0.0
-            written.append({"bot": strategy_id, "trades": total,
-                            "wins": b['wins'], "losses": b['losses'], "wr_pct": wr})
-
-        # Orden: peores primero (los candidatos a que el filtro pause)
-        written.sort(key=lambda x: (x['wr_pct'], -x['trades']))
-        return {
-            "archivos":          len(written),
-            "trades_evaluados":  len(trades),
-            "descartados_ajenos": skipped_foreign,
-            "rango_dias":        days,
-            "bots":              written,
-        }
-
+        result = reconcile_stats(connector, days=days)
+        if result["archivos"] == 0:
+            return {"message": "No se encontraron trades cerrados en el rango", **result}
+        return result
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error en stats backfill: {e}")
 
